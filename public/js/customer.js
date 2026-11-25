@@ -234,7 +234,7 @@
     `).join("");
 
     const rightPanel = state.entryMode === "book" ? `
-      <div class="card">
+      <div class="card seating-form-card">
         <p class="eyebrow">Step 1 · Book a Table</p>
         <h3>${state.selectedTable ? `Table ${state.selectedTable} selected` : "Select a green table"}</h3>
         <p class="muted" style="font-size:13px;margin:8px 0 18px;">
@@ -254,7 +254,7 @@
         </form>
       </div>
     ` : `
-      <div class="card">
+      <div class="card seating-form-card join-priority">
         <p class="eyebrow">Join Friends</p>
         <h3>Join an Active Table</h3>
         <p class="muted" style="font-size:13px;margin:8px 0 18px;">
@@ -532,7 +532,7 @@
           </div>
         </section>
 
-        <aside class="card bill-panel">
+        <aside class="card bill-panel" id="shared-bill-panel">
           <div style="display:flex;justify-content:space-between;align-items:center;">
             <div>
               <p class="eyebrow">Live Shared Bill</p>
@@ -570,10 +570,23 @@
           </div>
         </aside>
       </div>
+
+      <div class="mobile-bill-bar" aria-label="Shared bill quick summary">
+        <div>
+          <div style="font-size:11px;color:#d6e2da;">Table ${session.tableNumber} · ${session.itemCount} item(s)</div>
+          <strong class="num" style="font-size:16px;">${money(session.total)}</strong>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button type="button" class="btn btn-outline btn-sm" id="jump-bill-btn" style="background:transparent;color:#fff;border-color:#4b7460;">View Bill</button>
+          <button type="button" class="btn btn-brass btn-sm" id="mobile-checkout-btn" ${session.itemCount > 0 ? "" : "disabled"}>Checkout</button>
+        </div>
+      </div>
     `;
   }
 
   function render() {
+    const showMobileBar = Boolean(state.seat && state.session && state.session.status === "ACTIVE");
+    document.body.classList.toggle("has-mobile-bar", showMobileBar);
     if (!state.seat || !state.session) {
       clearInterval(state.durationTimer);
       renderSeatingView();
@@ -770,9 +783,15 @@
       return;
     }
 
-    if (e.target.id === "open-checkout-btn") {
+    if (e.target.id === "open-checkout-btn" || e.target.id === "mobile-checkout-btn") {
       renderCheckoutDialog();
       checkoutDialog.showModal();
+      return;
+    }
+
+    if (e.target.id === "jump-bill-btn") {
+      const panel = document.getElementById("shared-bill-panel");
+      if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
       return;
     }
 
