@@ -46,13 +46,18 @@
     return `${m}m ${String(sec).padStart(2, "0")}s`;
   }
 
+  function timeAgo(iso) {
+    if (!iso) return "";
+    const mins = Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 60000));
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins}m ago`;
+    return `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
+  }
+
   function formatDateTime(iso) {
     if (!iso) return "—";
     try {
-      return new Date(iso).toLocaleString("en-IN", {
-        dateStyle: "medium",
-        timeStyle: "short"
-      });
+      return new Date(iso).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
     } catch {
       return iso;
     }
@@ -68,9 +73,7 @@
 
   async function api(url, options = {}) {
     const headers = Object.assign({}, options.headers || {});
-    if (state.token) {
-      headers["Authorization"] = "Bearer " + state.token;
-    }
+    if (state.token) headers["Authorization"] = "Bearer " + state.token;
     const res = await fetch(url, Object.assign({}, options, { headers }));
     const data = await res.json().catch(() => ({}));
     if (res.status === 401 && url !== "/api/admin/login") {
@@ -105,7 +108,6 @@
     if (!state.token) return;
     const es = new EventSource(`/api/admin/events?token=${encodeURIComponent(state.token)}`);
     state.sse = es;
-
     es.addEventListener("connected", () => setLive(true, "Live updates"));
     es.addEventListener("update", () => {
       setLive(true, "Live updates");
@@ -142,9 +144,7 @@
       if (state.tab === "history") await loadHistory();
       if (state.tab === "feedback") await loadFeedback();
       render();
-    } catch {
-      // handled in api()
-    }
+    } catch {}
   }
 
   function startDurationClock() {
@@ -163,6 +163,35 @@
     }, 1000);
   }
 
+  function exportHistoryCsv() {
+    if (!state.history.length) {
+      toast("No history rows to export");
+      return;
+    }
+    const headers = ["SessionID", "Table", "JoinCode", "Guests", "Subtotal", "GST", "Total", "PaymentMode", "Status", "StartedAt", "DurationSeconds"];
+    const csvCell = val => `"${String(val ?? "").replace(/"/g, '""')}"`;
+    const rows = state.history.map(({ session }) => [
+      session.sessionId,
+      session.tableNumber,
+      session.joinCode,
+      session.customers.map(c => c.name).join("; "),
+      session.subtotal,
+      session.gst,
+      session.total,
+      session.paymentMode,
+      session.status,
+      session.startedAt,
+      session.durationSeconds
+    ].map(csvCell).join(","));
+    const csv = [headers.join(","), ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "spice-garden-history.csv";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
   // ==================== RENDERING ====================
 
   function renderLogin() {
@@ -172,7 +201,7 @@
       <div class="login-shell card">
         <p class="eyebrow">Spice Garden Operations</p>
         <h1 style="font-size:28px;margin-bottom:6px;">Admin Sign In</h1>
-        <p class="muted" style="font-size:13px;margin:0 0 18px;">Sign in to manage live dining tables, kitchen status, order history, and guest feedback.</p>
+        <p class="muted" style="font-size:13px;margin:0 0 18px;">Sign in to manage live dining tables, kitchen tickets, order history, and guest feedback.</p>
         <form id="admin-login-form" class="field" style="gap:14px;">
           <div class="field">
             <label for="adm-user">Username</label>
@@ -223,10 +252,7 @@
               </div>
 
               <div style="font-size:12px;" class="muted">${esc(t.zoneLabel)} · ${s.customers.length} guest(s)</div>
-
-              <div style="font-size:13px;">
-                <strong>Guests:</strong> ${guests || "—"}
-              </div>
+              <div style="font-size:13px;"><strong>Guests:</strong> ${guests || "—"}</div>
 
               <div style="display:flex;justify-content:space-between;padding:10px;background:var(--surface-alt);border-radius:6px;font-size:13px;">
                 <div>
@@ -250,59 +276,73 @@
     `;
   }
 
-  function renderKitchenTab(tables) {
-    const activeOrders = [];
+  function collectKitchenTickets(tables) {
+    const list = [];
     for (const t of tables) {
       if (!t.activeSession) continue;
       for (const o of t.activeSession.orders) {
         if (o.status !== "CANCELLED") {
-          activeOrders.push({ order: o, tableNumber: t.tableNumber, joinCode: t.activeSession.joinCode });
+          list.push({ order: o, tableNumber: t.tableNumber, joinCode: t.activeSession.joinCode });
         }
       }
     }
-    activeOrders.sort((a, b) => b.order.orderId - a.order.orderId);
+    list.sort((a, b) => a.order.orderId - b.order.orderId);
+    return list;
+  }
 
-    if (!activeOrders.length) {
+  function renderKitchenTab(tables) {
+    const all = collectKitchenTickets(tables);
+    if (!all.length) {
       return `<div class="card"><p class="muted" style="margin:0;">No active kitchen orders right now.</p></div>`;
     }
 
+    const pending = all.filter(x => x.order.status === "PLACED" || x.order.status === "PAID");
+    const preparing = all.filter(x => x.order.status === "PREPARING");
+    const ready = all.filter(x => x.order.status === "READY" || x.order.status === "SERVED");
+
+    const renderTicket = ({ order, tableNumber, joinCode }, actionBtn) => `
+      <article class="kot-ticket">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <strong class="mono">#${order.orderId} · Table ${tableNumber}</strong>
+          <span class="muted" style="font-size:11px;">${timeAgo(order.createdAt)}</span>
+        </div>
+        <div style="font-size:12px;" class="muted">
+          Guest: <strong>${esc(order.customerName)}</strong> · <span class="mono">${esc(joinCode)}</span>
+        </div>
+        <div style="border-top:1px dashed var(--line);padding-top:6px;font-size:13px;">
+          ${order.lines.map(l => `<div>${esc(l.name)} × <strong>${l.quantity}</strong></div>`).join("")}
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;padding-top:4px;">
+          <span class="status-tag status-${order.status}">${order.status}</span>
+          ${actionBtn}
+        </div>
+      </article>
+    `;
+
     return `
-      <div class="data-table-wrap">
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Order</th>
-              <th>Table</th>
-              <th>Customer</th>
-              <th>Items</th>
-              <th>Subtotal</th>
-              <th>Status</th>
-              <th>Update Kitchen</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${activeOrders.map(({ order, tableNumber, joinCode }) => `
-              <tr>
-                <td class="mono"><strong>#${order.orderId}</strong></td>
-                <td>Table ${tableNumber} <span class="mono muted" style="font-size:11px;">(${esc(joinCode)})</span></td>
-                <td>${esc(order.customerName)}</td>
-                <td>${order.lines.map(l => `${esc(l.name)} × ${l.quantity}`).join("<br>")}</td>
-                <td class="num">${money(order.total)}</td>
-                <td><span class="status-tag status-${order.status}">${order.status}</span></td>
-                <td>
-                  <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                    ${order.status === "PLACED" || order.status === "PAID"
-                      ? `<button class="btn btn-outline btn-sm" data-kstatus="PREPARING" data-oid="${order.orderId}">Preparing</button>` : ""}
-                    ${order.status !== "READY" && order.status !== "SERVED"
-                      ? `<button class="btn btn-primary btn-sm" data-kstatus="READY" data-oid="${order.orderId}">Mark Ready</button>` : ""}
-                    ${order.status === "READY"
-                      ? `<button class="btn btn-brass btn-sm" data-kstatus="SERVED" data-oid="${order.orderId}">Served</button>` : ""}
-                  </div>
-                </td>
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
+      <div class="kot-board">
+        <section class="kot-col">
+          <div class="kot-col-head"><span>Pending / Placed</span><span>${pending.length}</span></div>
+          ${pending.length ? pending.map(t => renderTicket(t,
+            `<button class="btn btn-primary btn-sm" data-kstatus="PREPARING" data-oid="${t.order.orderId}">Start Preparing →</button>`
+          )).join("") : `<p class="muted" style="font-size:12px;margin:0;">No pending tickets.</p>`}
+        </section>
+
+        <section class="kot-col">
+          <div class="kot-col-head"><span>Preparing</span><span>${preparing.length}</span></div>
+          ${preparing.length ? preparing.map(t => renderTicket(t,
+            `<button class="btn btn-brass btn-sm" data-kstatus="READY" data-oid="${t.order.orderId}">Mark Ready ✓</button>`
+          )).join("") : `<p class="muted" style="font-size:12px;margin:0;">Nothing cooking right now.</p>`}
+        </section>
+
+        <section class="kot-col">
+          <div class="kot-col-head"><span>Ready / Served</span><span>${ready.length}</span></div>
+          ${ready.length ? ready.map(t => renderTicket(t,
+            t.order.status === "READY"
+              ? `<button class="btn btn-outline btn-sm" data-kstatus="SERVED" data-oid="${t.order.orderId}">Mark Served</button>`
+              : `<span class="muted" style="font-size:11px;">Delivered</span>`
+          )).join("") : `<p class="muted" style="font-size:12px;margin:0;">No dishes waiting for pickup.</p>`}
+        </section>
       </div>
     `;
   }
@@ -342,6 +382,7 @@
             <input id="h-to" type="date" value="${esc(f.to)}">
           </div>
           <button class="btn btn-primary" type="submit">Filter</button>
+          <button class="btn btn-outline" type="button" id="export-csv-btn">Export CSV</button>
         </form>
       </div>
 
@@ -430,6 +471,7 @@
     }
 
     const s = d.stats;
+    const kitchenPendingCount = collectKitchenTickets(d.tables).filter(x => x.order.status !== "SERVED").length;
     let bodyHtml = "";
     if (state.tab === "floor") bodyHtml = renderFloorTab(d.tables);
     else if (state.tab === "kitchen") bodyHtml = renderKitchenTab(d.tables);
@@ -471,10 +513,18 @@
       </section>
 
       <nav class="admin-tabs">
-        <button type="button" class="admin-tab ${state.tab === "floor" ? "active" : ""}" data-tab="floor">Live Floor &amp; Tables</button>
-        <button type="button" class="admin-tab ${state.tab === "kitchen" ? "active" : ""}" data-tab="kitchen">Live Kitchen Feed</button>
-        <button type="button" class="admin-tab ${state.tab === "history" ? "active" : ""}" data-tab="history">Order History &amp; Search</button>
-        <button type="button" class="admin-tab ${state.tab === "feedback" ? "active" : ""}" data-tab="feedback">Guest Feedback</button>
+        <button type="button" class="admin-tab ${state.tab === "floor" ? "active" : ""}" data-tab="floor">
+          Live Floor &amp; Tables <span class="tab-count num">${s.occupiedCount}</span>
+        </button>
+        <button type="button" class="admin-tab ${state.tab === "kitchen" ? "active" : ""}" data-tab="kitchen">
+          Live Kitchen Feed <span class="tab-count num">${kitchenPendingCount}</span>
+        </button>
+        <button type="button" class="admin-tab ${state.tab === "history" ? "active" : ""}" data-tab="history">
+          Order History &amp; Search <span class="tab-count num">${s.completedCount}</span>
+        </button>
+        <button type="button" class="admin-tab ${state.tab === "feedback" ? "active" : ""}" data-tab="feedback">
+          Guest Feedback <span class="tab-count num">${s.feedbackCount}</span>
+        </button>
       </nav>
 
       ${bodyHtml}
@@ -532,6 +582,10 @@
           `).join("")}
         </div>
       ` : ""}
+
+      <div class="no-print" style="margin-top:16px;display:flex;justify-content:flex-end;">
+        <button type="button" class="btn btn-outline btn-sm" id="print-receipt-btn">Print Receipt</button>
+      </div>
     `;
     detailDialog.showModal();
   }
@@ -574,6 +628,11 @@
   });
 
   app.addEventListener("click", async e => {
+    if (e.target.id === "export-csv-btn") {
+      exportHistoryCsv();
+      return;
+    }
+
     const tabBtn = e.target.closest("[data-tab]");
     if (tabBtn) {
       state.tab = tabBtn.dataset.tab;
@@ -634,6 +693,12 @@
       state.feedbackMinRating = fbFilterBtn.dataset.fbfilter;
       await loadFeedback();
       render();
+    }
+  });
+
+  detailDialog.addEventListener("click", e => {
+    if (e.target.id === "print-receipt-btn") {
+      window.print();
     }
   });
 

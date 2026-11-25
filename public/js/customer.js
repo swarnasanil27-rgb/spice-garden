@@ -3,6 +3,14 @@
 (function () {
   const STORAGE_KEY = "sg_customer_seat";
   const DISH_IMAGES = {
+    "Paneer Tikka": "/public/dishes/paneer-tikka.jpg",
+    "Chicken Wings": "/public/dishes/chicken-wings.jpg",
+    "Veg Biryani": "/public/dishes/veg-biryani.jpg",
+    "Butter Chicken": "/public/dishes/butter-chicken.jpg",
+    "Gulab Jamun": "/public/dishes/gulab-jamun.jpg",
+    "Masala Chai": "/public/dishes/masala-chai.jpg"
+  };
+  const DISH_FALLBACKS = {
     "Paneer Tikka": "/public/dishes/paneer-tikka.svg",
     "Chicken Wings": "/public/dishes/chicken-wings.svg",
     "Veg Biryani": "/public/dishes/veg-biryani.svg",
@@ -10,18 +18,20 @@
     "Gulab Jamun": "/public/dishes/gulab-jamun.svg",
     "Masala Chai": "/public/dishes/masala-chai.svg"
   };
+  const AVATAR_PALETTE = ["#153124", "#b07d2f", "#227647", "#8b241a", "#35536b", "#6b4263"];
 
   const state = {
     menu: [],
     tables: [],
-    seat: loadSeat(), // { sessionId, customerId, customerName, tableNumber, joinCode }
+    seat: loadSeat(),
     session: null,
-    entryMode: "book", // "book" | "join"
+    entryMode: "book",
     selectedTable: null,
     joinPrefill: "",
     category: "ALL",
     dietFilter: "ALL",
-    billTab: "by-guest", // "by-guest" | "combined"
+    searchQuery: "",
+    billTab: "by-guest",
     picks: {},
     payMode: "UPI",
     receiptNote: "",
@@ -51,11 +61,8 @@
 
   function saveSeat(seat) {
     state.seat = seat;
-    if (seat) {
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(seat));
-    } else {
-      sessionStorage.removeItem(STORAGE_KEY);
-    }
+    if (seat) sessionStorage.setItem(STORAGE_KEY, JSON.stringify(seat));
+    else sessionStorage.removeItem(STORAGE_KEY);
   }
 
   function esc(text) {
@@ -81,12 +88,36 @@
     return `${m}m ${String(sec).padStart(2, "0")}s`;
   }
 
-  function toast(msg) {
+  function avatarColor(id) {
+    const idx = Math.abs(Number(id || 0)) % AVATAR_PALETTE.length;
+    return AVATAR_PALETTE[idx];
+  }
+
+  function initials(name) {
+    const parts = String(name || "?").trim().split(/\s+/);
+    return (parts[0][0] || "?").toUpperCase();
+  }
+
+  function toast(msg, actionLabel, onAction) {
     const el = document.getElementById("toast");
-    el.textContent = msg;
+    el.innerHTML = "";
+    const span = document.createElement("span");
+    span.textContent = msg;
+    el.appendChild(span);
+    if (actionLabel && typeof onAction === "function") {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = actionLabel;
+      btn.style.cssText = "border:1px solid #e4be73;background:transparent;color:#e4be73;border-radius:999px;padding:2px 9px;font-size:11px;font-weight:700;";
+      btn.addEventListener("click", () => {
+        el.classList.remove("show");
+        onAction();
+      });
+      el.appendChild(btn);
+    }
     el.classList.add("show");
     clearTimeout(toast._t);
-    toast._t = setTimeout(() => el.classList.remove("show"), 2200);
+    toast._t = setTimeout(() => el.classList.remove("show"), 2600);
   }
 
   async function api(url, options) {
@@ -123,22 +154,13 @@
     const es = new EventSource(url);
     state.sse = es;
 
-    es.addEventListener("connected", () => {
-      setLiveStatus(true, "Live sync");
-    });
-
+    es.addEventListener("connected", () => setLiveStatus(true, "Live sync"));
     es.addEventListener("update", () => {
       setLiveStatus(true, "Live sync");
-      if (state.seat) {
-        refreshCurrentSession(true);
-      } else {
-        refreshTables();
-      }
+      if (state.seat) refreshCurrentSession(true);
+      else refreshTables();
     });
-
-    es.onerror = () => {
-      setLiveStatus(false, "Reconnecting");
-    };
+    es.onerror = () => setLiveStatus(false, "Reconnecting");
   }
 
   async function refreshMenu() {
@@ -180,13 +202,80 @@
       if (!clock || !state.session || state.session.status !== "ACTIVE") return;
       const started = Date.parse(state.session.startedAt);
       if (!Number.isNaN(started)) {
-        const elapsed = Math.floor((Date.now() - started) / 1000);
-        clock.textContent = formatDuration(elapsed);
+        clock.textContent = formatDuration(Math.floor((Date.now() - started) / 1000));
       }
     }, 1000);
   }
 
-  // ==================== RENDERING: SEATING VIEW ====================
+  function tableSilhouette(t) {
+    const chairsPerSide = Math.max(1, Math.floor(t.capacity / 2));
+    const pips = Array.from({ length: chairsPerSide }, () => '<span class="chair-pip"></span>').join("");
+    const wide = t.capacity >= 6 ? "wide" : "";
+    return `
+      <div class="table-silhouette" aria-hidden="true">
+        <div class="chair-row">${pips}</div>
+        <div class="table-surface-box ${wide}">${esc(t.label)}</div>
+        <div class="chair-row">${pips}</div>
+      </div>
+    `;
+  }
+
+  function spicePipsHtml(level) {
+    const n = Math.max(1, Math.min(5, Number(level || 1)));
+    return `<span class="spice-pips" title="Spice ${n}/5">${Array.from({ length: 5 }, (_, i) =>
+      `<span class="spice-pip ${i < n ? "hot" : ""}"></span>`
+    ).join("")}</span>`;
+  }
+
+  function renderDishCard(item, orderedQty, interactive) {
+    const catLabels = {
+      STARTER: "Starter",
+      MAIN_COURSE: "Main Course",
+      DESSERT: "Dessert",
+      DRINK: "Drink"
+    };
+    const qty = state.picks[item.id] || 1;
+    const isVeg = item.type === "VEG";
+    const img = DISH_IMAGES[item.name] || "/public/dishes/veg-biryani.jpg";
+    const fallback = DISH_FALLBACKS[item.name] || "/public/dishes/veg-biryani.svg";
+
+    return `
+      <article class="dish-card">
+        <div class="dish-photo-wrap">
+          <img src="${img}" alt="${esc(item.name)}" loading="lazy" onerror="this.onerror=null;this.src='${fallback}';">
+          <span class="dish-cat-tag">${esc(catLabels[item.category] || item.category)}</span>
+          ${orderedQty > 0 ? `<span class="in-order-tag num">In order ×${orderedQty}</span>` : ""}
+        </div>
+        <div class="dish-body">
+          <div class="dish-title-row">
+            <span class="diet-dot ${isVeg ? "veg" : "nonveg"}" title="${isVeg ? "Vegetarian" : "Non-Vegetarian"}"></span>
+            <h3>${esc(item.name)}</h3>
+          </div>
+          <div class="dish-sub">
+            <span>${isVeg ? "Vegetarian" : "Non-Vegetarian"}</span>
+            ${!isVeg && item.spice ? `<span>·</span>${spicePipsHtml(item.spice)}` : ""}
+          </div>
+        </div>
+        <div class="dish-foot">
+          <span class="dish-price num">${money(item.price)}</span>
+          ${interactive ? `
+            <div style="display:flex;align-items:center;gap:8px;">
+              <div class="stepper">
+                <button type="button" data-dec="${item.id}" aria-label="Decrease">−</button>
+                <span>${qty}</span>
+                <button type="button" data-inc="${item.id}" aria-label="Increase">+</button>
+              </div>
+              <button type="button" class="btn btn-primary btn-sm" data-add="${item.id}">Add</button>
+            </div>
+          ` : `
+            <a class="btn btn-outline btn-sm" href="#floor-plan">Select table to order</a>
+          `}
+        </div>
+      </article>
+    `;
+  }
+
+  // ==================== RENDERING: LANDING + ARCHITECTURAL FLOOR PLAN ====================
 
   function renderSeatingView() {
     connectSse("tables");
@@ -203,35 +292,43 @@
     const availCount = state.tables.filter(t => t.status === "AVAILABLE").length;
     const occCount = state.tables.length - availCount;
 
-    const floorHtml = zones.map(zone => `
-      <div class="zone-block">
-        <div class="zone-title">${esc(zone)}</div>
-        <div class="tables-row">
-          ${byZone.get(zone).map(t => {
-            const avail = t.status === "AVAILABLE";
-            const selected = state.selectedTable === t.tableNumber;
-            const cls = selected ? "selected" : (avail ? "available" : "occupied");
-            return `
-              <button
-                type="button"
-                class="table-tile ${cls}"
-                data-table="${t.tableNumber}"
-                data-status="${t.status}"
-                aria-label="Table ${t.tableNumber}, ${t.capacity} seats, ${avail ? "Available" : "Occupied"}"
-              >
-                <div class="table-tile-top">
-                  <span class="table-num">${esc(t.label)}</span>
-                  <span class="table-badge">${avail ? "Available" : "Occupied"}</span>
-                </div>
-                <div class="table-meta">
-                  ${t.capacity} seats · ${avail ? "Tap to book" : `${t.guestCount} seated`}
-                </div>
-              </button>
-            `;
-          }).join("")}
+    const floorHtml = `
+      <div class="room-shell">
+        <div class="room-wall-label">
+          <span>North Window Wall · Entrance</span>
+          <span>Kitchen Pass &amp; Counter →</span>
         </div>
+        ${zones.map(zone => `
+          <div class="zone-block">
+            <div class="zone-title">${esc(zone)}</div>
+            <div class="tables-row">
+              ${byZone.get(zone).map(t => {
+                const avail = t.status === "AVAILABLE";
+                const selected = state.selectedTable === t.tableNumber;
+                const cls = selected ? "selected" : (avail ? "available" : "occupied");
+                return `
+                  <button
+                    type="button"
+                    class="table-tile ${cls}"
+                    data-table="${t.tableNumber}"
+                    data-status="${t.status}"
+                    aria-label="Table ${t.tableNumber}, ${t.capacity} seats, ${avail ? "Available" : "Occupied"}"
+                  >
+                    <div class="table-shape-wrap">
+                      ${tableSilhouette(t)}
+                      <span class="table-badge">${avail ? "Available" : "Occupied"}</span>
+                    </div>
+                    <div class="table-meta">
+                      ${t.capacity} seats · ${avail ? "Tap to book" : `${t.guestCount} seated`}
+                    </div>
+                  </button>
+                `;
+              }).join("")}
+            </div>
+          </div>
+        `).join("")}
       </div>
-    `).join("");
+    `;
 
     const rightPanel = state.entryMode === "book" ? `
       <div class="card seating-form-card">
@@ -276,36 +373,88 @@
     `;
 
     app.innerHTML = `
-      <section class="seating-intro">
-        <div>
-          <p class="eyebrow">Welcome to Spice Garden</p>
-          <h1>Choose your table to dine</h1>
-          <p class="muted" style="margin:6px 0 0;">
-            ${availCount} available · ${occCount} occupied · Multiple guests can share one table bill in real time
-          </p>
-        </div>
-        <div class="mode-tabs" role="tablist">
-          <button class="mode-tab ${state.entryMode === "book" ? "active" : ""}" type="button" data-entry="book">Book a Table</button>
-          <button class="mode-tab ${state.entryMode === "join" ? "active" : ""}" type="button" data-entry="join">Join with Code / QR</button>
+      <section class="hero-band">
+        <div class="hero-inner">
+          <div class="hero-copy">
+            <p class="eyebrow" style="color:#e4be73;">Spice Garden · Indian Kitchen &amp; Dining</p>
+            <h1>Honest flavours.<br><em>Shared at your table.</em></h1>
+            <p class="hero-lead">
+              Freshly roasted spices, clay-oven starters, and slow-simmered curries. Pick your table on our live floor plan and invite everyone at your table to order onto one shared bill.
+            </p>
+            <div class="hero-actions">
+              <a class="btn btn-brass" href="#floor-plan">Book or Join a Table ↓</a>
+              <a class="btn btn-hero-outline" href="#preview-menu">Explore Menu ↓</a>
+            </div>
+            <div class="hero-facts">
+              <div><strong>${availCount} / ${state.tables.length || 10} Open</strong>Live tables ready</div>
+              <div><strong>Shared QR Bill</strong>Order from any phone</div>
+              <div><strong>11:30 – 23:30</strong>Served fresh daily</div>
+            </div>
+          </div>
+          <div class="hero-media">
+            <div class="hero-photo-frame">
+              <img src="/public/dishes/hero-feast.jpg" alt="Spice Garden Indian dining feast">
+            </div>
+            <div class="hero-badge">
+              <strong>4.8 ★</strong>
+              <span>Guest favourite kitchen</span>
+            </div>
+          </div>
         </div>
       </section>
 
-      <div class="seating-grid">
-        <section class="card">
-          <div class="floor-header">
+      <div class="page-full">
+        <section class="section-wrap" id="floor-plan">
+          <div class="seating-intro">
             <div>
-              <h2 style="font-size:22px;">Dining Floor Plan</h2>
-              <p class="muted" style="margin:2px 0 0;font-size:13px;">Live table availability updates automatically</p>
+              <p class="eyebrow">Live Dining Room</p>
+              <h2>Choose your table</h2>
+              <p class="muted" style="margin:6px 0 0;">
+                ${availCount} available · ${occCount} occupied · Select a green table to begin or enter a join code
+              </p>
             </div>
-            <div class="legend">
-              <span class="legend-item"><span class="swatch available"></span> Available</span>
-              <span class="legend-item"><span class="swatch occupied"></span> Occupied</span>
-              <span class="legend-item"><span class="swatch selected"></span> Selected</span>
+            <div class="mode-tabs" role="tablist">
+              <button class="mode-tab ${state.entryMode === "book" ? "active" : ""}" type="button" data-entry="book">Book a Table</button>
+              <button class="mode-tab ${state.entryMode === "join" ? "active" : ""}" type="button" data-entry="join">Join with Code / QR</button>
             </div>
           </div>
-          ${state.tables.length ? floorHtml : '<p class="muted">Loading tables…</p>'}
+
+          <div class="seating-grid">
+            <section class="card">
+              <div class="floor-header">
+                <div>
+                  <h3 style="font-size:21px;">Architectural Floor Plan</h3>
+                  <p class="muted" style="margin:2px 0 0;font-size:13px;">Chair pips show seating capacity · Live updates</p>
+                </div>
+                <div class="legend">
+                  <span class="legend-item"><span class="swatch available"></span> Available</span>
+                  <span class="legend-item"><span class="swatch occupied"></span> Occupied</span>
+                  <span class="legend-item"><span class="swatch selected"></span> Selected</span>
+                </div>
+              </div>
+              ${state.tables.length ? floorHtml : '<p class="muted">Loading tables…</p>'}
+            </section>
+            ${rightPanel}
+          </div>
         </section>
-        ${rightPanel}
+
+        <section class="section-wrap" id="preview-menu">
+          <div class="seating-intro" style="margin-bottom:18px;">
+            <div>
+              <p class="eyebrow">From Our Kitchen</p>
+              <h2>Signature Dishes</h2>
+              <p class="muted" style="margin:6px 0 0;">Preview today’s menu, then select a table above to start ordering.</p>
+            </div>
+          </div>
+          <div class="menu-grid">
+            ${state.menu.map(item => renderDishCard(item, 0, false)).join("")}
+          </div>
+        </section>
+
+        <footer class="site-footer">
+          <div><strong>Spice Garden</strong> · Indian Kitchen &amp; Dining</div>
+          <div>Freshly prepared to order · Table-side QR shared billing</div>
+        </footer>
       </div>
     `;
   }
@@ -356,33 +505,48 @@
     `;
 
     app.innerHTML = `
-      <div style="max-width:760px;margin:0 auto;display:grid;gap:20px;">
-        <div class="card" style="border-color:var(--avail-border);">
-          <p class="eyebrow" style="color:var(--avail-ink);">Payment Confirmed · Table Released</p>
-          <h1 style="font-size:30px;">Table ${session.tableNumber} settled</h1>
-          <p class="muted" style="margin:6px 0 14px;font-size:14px;">
-            ${state.receiptNote ? esc(state.receiptNote) + " · " : ""}Session #${session.sessionId} · Paid via <strong>${esc(session.paymentMode)}</strong> · Duration ${formatDuration(session.durationSeconds)}
-          </p>
-          <div style="border-top:1px solid var(--line);padding-top:12px;">
-            ${session.consolidatedLines.map(l => `
-              <div class="order-line">
-                <span>${esc(l.name)} × ${l.quantity}</span>
-                <span class="num">${money(l.lineTotal)}</span>
+      <div class="page">
+        <div style="max-width:760px;margin:0 auto;display:grid;gap:20px;">
+          <div class="card" style="border-color:var(--avail-border);">
+            <p class="eyebrow" style="color:var(--avail-ink);">Payment Confirmed · Table Released</p>
+            <h1 style="font-size:30px;">Table ${session.tableNumber} settled</h1>
+            <p class="muted" style="margin:6px 0 14px;font-size:14px;">
+              ${state.receiptNote ? esc(state.receiptNote) + " · " : ""}Session #${session.sessionId} · Paid via <strong>${esc(session.paymentMode)}</strong> · Duration ${formatDuration(session.durationSeconds)}
+            </p>
+            <div style="border-top:1px solid var(--line);padding-top:12px;">
+              ${session.consolidatedLines.map(l => `
+                <div class="order-line">
+                  <span>${esc(l.name)} × ${l.quantity}</span>
+                  <span class="num">${money(l.lineTotal)}</span>
+                </div>
+              `).join("")}
+              <div class="totals-box">
+                <div class="total-row"><span>Subtotal</span><span class="num">${money(session.subtotal)}</span></div>
+                <div class="total-row"><span>GST (5%)</span><span class="num">${money(session.gst)}</span></div>
+                <div class="total-row grand"><span>Total Paid</span><span class="num">${money(session.total)}</span></div>
               </div>
-            `).join("")}
-            <div class="totals-box">
-              <div class="total-row"><span>Subtotal</span><span class="num">${money(session.subtotal)}</span></div>
-              <div class="total-row"><span>GST (5%)</span><span class="num">${money(session.gst)}</span></div>
-              <div class="total-row grand"><span>Total Paid</span><span class="num">${money(session.total)}</span></div>
             </div>
           </div>
+          ${fbHtml}
         </div>
-        ${fbHtml}
       </div>
     `;
   }
 
   // ==================== RENDERING: ACTIVE ORDERING WORKSPACE ====================
+
+  function orderProgressHtml(status) {
+    const steps = ["PLACED", "PREPARING", "READY", "SERVED"];
+    const labels = ["Placed", "Preparing", "Ready", "Served"];
+    const idx = Math.max(0, steps.indexOf(status));
+    return `
+      <div class="order-progress">
+        ${steps.map((s, i) => `
+          <div class="prog-step ${i < idx ? "done" : (i === idx ? "current" : "")}">${labels[i]}</div>
+        `).join("")}
+      </div>
+    `;
+  }
 
   function renderSessionView(session) {
     connectSse("session:" + session.sessionId);
@@ -401,9 +565,11 @@
       DRINK: "Drinks"
     };
 
+    const q = state.searchQuery.trim().toLowerCase();
     const filteredMenu = state.menu.filter(item => {
       if (state.category !== "ALL" && item.category !== state.category) return false;
       if (state.dietFilter !== "ALL" && item.type !== state.dietFilter) return false;
+      if (q && !item.name.toLowerCase().includes(q)) return false;
       return true;
     });
 
@@ -411,14 +577,25 @@
     const myOrders = (session.customers.find(c => c.customerId === myCustomerId)?.orders || []);
     const hasMyPlacedOrder = myOrders.some(o => o.status === "PLACED" && o.lines.length > 0);
 
+    // Count items already ordered by current guest across active orders
+    const myItemCounts = new Map();
+    for (const o of myOrders) {
+      if (o.status === "CANCELLED") continue;
+      for (const l of o.lines) {
+        myItemCounts.set(l.itemId, (myItemCounts.get(l.itemId) || 0) + l.quantity);
+      }
+    }
+
     const byGuestHtml = session.customers.map(c => {
       const isMe = c.customerId === myCustomerId;
+      const color = avatarColor(c.customerId);
       const ordersHtml = c.orders.length ? c.orders.map(o => `
         <div class="order-block">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
             <span class="muted" style="font-size:11px;">Order #${o.orderId}</span>
             <span class="status-tag status-${o.status}">${o.status}</span>
           </div>
+          ${orderProgressHtml(o.status)}
           ${o.lines.map(l => `
             <div class="order-line">
               <span>${esc(l.name)} × ${l.quantity}</span>
@@ -436,7 +613,10 @@
       return `
         <div class="customer-group">
           <div class="customer-group-head">
-            <span>${esc(c.name)} ${isMe ? "(You)" : ""}</span>
+            <span style="display:inline-flex;align-items:center;gap:8px;">
+              <span class="guest-avatar" style="background:${color};">${esc(initials(c.name))}</span>
+              <span>${esc(c.name)} ${isMe ? "(You)" : ""}</span>
+            </span>
             <span class="num">${money(c.subtotal)}</span>
           </div>
           ${ordersHtml}
@@ -454,145 +634,132 @@
       : `<p class="muted" style="font-size:13px;">Your table hasn’t added any items yet. Pick dishes from the menu.</p>`;
 
     app.innerHTML = `
-      <section class="session-banner">
-        <div>
-          <p class="eyebrow" style="color:#f3d28f;margin-bottom:4px;">Active Shared Table Session</p>
-          <h2>Table ${session.tableNumber} · ${esc(session.customers.length)} ${session.customers.length === 1 ? "Guest" : "Guests"}</h2>
-          <div class="session-meta-row">
-            <span>Join Code:</span>
-            <span class="code-chip">${esc(session.joinCode)}</span>
-            <span>·</span>
-            <span>Seated: <strong id="session-duration" class="num">${formatDuration(session.durationSeconds)}</strong></span>
-          </div>
-          <div class="guest-pills">
-            ${session.customers.map(c => `
-              <span class="guest-pill ${c.customerId === myCustomerId ? "me" : ""}">
-                ${esc(c.name)}${c.customerId === myCustomerId ? " (You)" : ""}
-              </span>
-            `).join("")}
-          </div>
-        </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button class="btn btn-brass btn-sm" type="button" id="open-qr-btn">Invite via QR / Code</button>
-          <button class="btn btn-outline btn-sm" type="button" id="leave-view-btn" style="background:transparent;color:#fff;border-color:#4b7460;">Switch Table</button>
-        </div>
-      </section>
-
-      <div class="workspace-grid">
-        <section>
-          <div class="menu-controls">
-            <div class="filter-pills">
-              ${categories.map(cat => `
-                <button type="button" class="pill ${state.category === cat ? "active" : ""}" data-cat="${cat}">
-                  ${catLabels[cat]}
-                </button>
+      <div class="page">
+        <section class="session-banner">
+          <div>
+            <p class="eyebrow" style="color:#e4be73;margin-bottom:4px;">Active Shared Table Session</p>
+            <h2>Table ${session.tableNumber} · ${esc(session.customers.length)} ${session.customers.length === 1 ? "Guest" : "Guests"}</h2>
+            <div class="session-meta-row">
+              <span>Join Code:</span>
+              <span class="code-chip">${esc(session.joinCode)}</span>
+              <span>·</span>
+              <span>Seated: <strong id="session-duration" class="num">${formatDuration(session.durationSeconds)}</strong></span>
+            </div>
+            <div class="guest-pills">
+              ${session.customers.map(c => `
+                <span class="guest-pill ${c.customerId === myCustomerId ? "me" : ""}">
+                  <span class="guest-avatar" style="background:${avatarColor(c.customerId)};">${esc(initials(c.name))}</span>
+                  ${esc(c.name)}${c.customerId === myCustomerId ? " (You)" : ""}
+                </span>
               `).join("")}
             </div>
-            <div class="filter-pills">
-              <button type="button" class="pill ${state.dietFilter === "ALL" ? "active" : ""}" data-diet="ALL">All</button>
-              <button type="button" class="pill ${state.dietFilter === "VEG" ? "active" : ""}" data-diet="VEG">Veg</button>
-              <button type="button" class="pill ${state.dietFilter === "NON_VEG" ? "active" : ""}" data-diet="NON_VEG">Non-Veg</button>
-            </div>
           </div>
-
-          <div class="menu-grid">
-            ${filteredMenu.map(item => {
-              const qty = state.picks[item.id] || 1;
-              const isVeg = item.type === "VEG";
-              const img = DISH_IMAGES[item.name] || "/public/dishes/veg-biryani.svg";
-              return `
-                <article class="dish-card">
-                  <div class="dish-head">
-                    <img class="dish-img" src="${img}" alt="${esc(item.name)}">
-                    <div>
-                      <div class="dish-title-row">
-                        <span class="diet-dot ${isVeg ? "veg" : "nonveg"}" title="${isVeg ? "Vegetarian" : "Non-Vegetarian"}"></span>
-                        <h3>${esc(item.name)}</h3>
-                      </div>
-                      <div class="dish-sub">
-                        ${catLabels[item.category] || item.category}
-                        ${!isVeg && item.spice ? ` · Spice ${item.spice}/5` : ""}
-                      </div>
-                    </div>
-                  </div>
-                  <div class="dish-foot">
-                    <span class="dish-price num">${money(item.price)}</span>
-                    <div style="display:flex;align-items:center;gap:8px;">
-                      <div class="stepper">
-                        <button type="button" data-dec="${item.id}" aria-label="Decrease">−</button>
-                        <span>${qty}</span>
-                        <button type="button" data-inc="${item.id}" aria-label="Increase">+</button>
-                      </div>
-                      <button type="button" class="btn btn-primary btn-sm" data-add="${item.id}">Add</button>
-                    </div>
-                  </div>
-                </article>
-              `;
-            }).join("")}
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="btn btn-brass btn-sm" type="button" id="open-qr-btn">Invite via QR / Code</button>
+            <button class="btn btn-outline btn-sm" type="button" id="leave-view-btn" style="background:transparent;color:#fff;border-color:#4b7460;">Switch Table</button>
           </div>
         </section>
 
-        <aside class="card bill-panel" id="shared-bill-panel">
-          <div style="display:flex;justify-content:space-between;align-items:center;">
-            <div>
-              <p class="eyebrow">Live Shared Bill</p>
-              <h3 style="font-size:22px;">Table ${session.tableNumber} Order</h3>
+        <div class="workspace-grid">
+          <section>
+            <div class="menu-search-row">
+              <input id="menu-search" type="search" value="${esc(state.searchQuery)}" placeholder="Search dishes (e.g. Biryani, Tikka, Chai)…">
+              <div class="filter-pills">
+                <button type="button" class="pill ${state.dietFilter === "ALL" ? "active" : ""}" data-diet="ALL">All</button>
+                <button type="button" class="pill ${state.dietFilter === "VEG" ? "active" : ""}" data-diet="VEG">Veg</button>
+                <button type="button" class="pill ${state.dietFilter === "NON_VEG" ? "active" : ""}" data-diet="NON_VEG">Non-Veg</button>
+              </div>
             </div>
-            <span class="num muted" style="font-size:12px;font-weight:700;">${session.itemCount} items</span>
-          </div>
 
-          <div class="bill-tabs">
-            <button type="button" class="bill-tab ${state.billTab === "by-guest" ? "active" : ""}" data-billtab="by-guest">By Guest (${session.customers.length})</button>
-            <button type="button" class="bill-tab ${state.billTab === "combined" ? "active" : ""}" data-billtab="combined">Combined Bill</button>
-          </div>
+            <div class="menu-controls">
+              <div class="filter-pills">
+                ${categories.map(cat => `
+                  <button type="button" class="pill ${state.category === cat ? "active" : ""}" data-cat="${cat}">
+                    ${catLabels[cat]}
+                  </button>
+                `).join("")}
+              </div>
+            </div>
 
-          <div>
-            ${state.billTab === "by-guest" ? byGuestHtml : combinedHtml}
-          </div>
+            <div class="menu-grid">
+              ${filteredMenu.length
+                ? filteredMenu.map(item => renderDishCard(item, myItemCounts.get(item.id) || 0, true)).join("")
+                : `<div class="card" style="grid-column:1/-1;"><p class="muted" style="margin:0;">No dishes match your filter.</p></div>`}
+            </div>
+          </section>
 
-          <div class="totals-box">
-            <div class="total-row"><span>Subtotal</span><span class="num">${money(session.subtotal)}</span></div>
-            <div class="total-row"><span>GST (5%)</span><span class="num">${money(session.gst)}</span></div>
-            <div class="total-row grand"><span>Shared Total</span><span class="num">${money(session.total)}</span></div>
-          </div>
+          <aside class="card bill-panel" id="shared-bill-panel">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <div>
+                <p class="eyebrow">Live Shared Bill</p>
+                <h3 style="font-size:22px;">Table ${session.tableNumber} Order</h3>
+              </div>
+              <span class="num muted" style="font-size:12px;font-weight:700;">${session.itemCount} items</span>
+            </div>
 
-          <p class="error-msg" id="workspace-error">${esc(state.error)}</p>
+            <div class="bill-tabs">
+              <button type="button" class="bill-tab ${state.billTab === "by-guest" ? "active" : ""}" data-billtab="by-guest">By Guest (${session.customers.length})</button>
+              <button type="button" class="bill-tab ${state.billTab === "combined" ? "active" : ""}" data-billtab="combined">Combined Bill</button>
+            </div>
 
-          <div style="display:grid;gap:8px;margin-top:12px;">
-            ${hasMyPlacedOrder ? `
-              <button type="button" class="btn btn-brass btn-block" id="send-kitchen-btn">
-                Send My Pending Items to Kitchen
+            <div>
+              ${state.billTab === "by-guest" ? byGuestHtml : combinedHtml}
+            </div>
+
+            <div class="totals-box">
+              <div class="total-row"><span>Subtotal</span><span class="num">${money(session.subtotal)}</span></div>
+              <div class="total-row"><span>GST (5%)</span><span class="num">${money(session.gst)}</span></div>
+              <div class="total-row grand"><span>Shared Total</span><span class="num">${money(session.total)}</span></div>
+            </div>
+
+            <p class="error-msg" id="workspace-error">${esc(state.error)}</p>
+
+            <div style="display:grid;gap:8px;margin-top:12px;">
+              ${hasMyPlacedOrder ? `
+                <button type="button" class="btn btn-brass btn-block" id="send-kitchen-btn">
+                  Send My Pending Items to Kitchen
+                </button>
+              ` : ""}
+              <button type="button" class="btn btn-primary btn-block" id="open-checkout-btn" ${session.itemCount > 0 ? "" : "disabled"}>
+                Proceed to Checkout (${money(session.total)})
               </button>
-            ` : ""}
-            <button type="button" class="btn btn-primary btn-block" id="open-checkout-btn" ${session.itemCount > 0 ? "" : "disabled"}>
-              Proceed to Checkout (${money(session.total)})
-            </button>
-          </div>
-        </aside>
-      </div>
-
-      <div class="mobile-bill-bar" aria-label="Shared bill quick summary">
-        <div>
-          <div style="font-size:11px;color:#d6e2da;">Table ${session.tableNumber} · ${session.itemCount} item(s)</div>
-          <strong class="num" style="font-size:16px;">${money(session.total)}</strong>
+            </div>
+          </aside>
         </div>
-        <div style="display:flex;gap:8px;">
-          <button type="button" class="btn btn-outline btn-sm" id="jump-bill-btn" style="background:transparent;color:#fff;border-color:#4b7460;">View Bill</button>
-          <button type="button" class="btn btn-brass btn-sm" id="mobile-checkout-btn" ${session.itemCount > 0 ? "" : "disabled"}>Checkout</button>
+
+        <div class="mobile-bill-bar" aria-label="Shared bill quick summary">
+          <div>
+            <div style="font-size:11px;color:#d6e2da;">Table ${session.tableNumber} · ${session.itemCount} item(s)</div>
+            <strong class="num" style="font-size:16px;">${money(session.total)}</strong>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <button type="button" class="btn btn-outline btn-sm" id="jump-bill-btn" style="background:transparent;color:#fff;border-color:#4b7460;">View Bill</button>
+            <button type="button" class="btn btn-brass btn-sm" id="mobile-checkout-btn" ${session.itemCount > 0 ? "" : "disabled"}>Checkout</button>
+          </div>
         </div>
       </div>
     `;
   }
 
   function render() {
+    const activeSearch = document.activeElement && document.activeElement.id === "menu-search";
+    const selStart = activeSearch ? document.activeElement.selectionStart : null;
     const showMobileBar = Boolean(state.seat && state.session && state.session.status === "ACTIVE");
     document.body.classList.toggle("has-mobile-bar", showMobileBar);
+
     if (!state.seat || !state.session) {
       clearInterval(state.durationTimer);
       renderSeatingView();
     } else {
       renderSessionView(state.session);
       startDurationClock();
+      if (activeSearch) {
+        const searchEl = document.getElementById("menu-search");
+        if (searchEl) {
+          searchEl.focus();
+          if (selStart !== null) searchEl.setSelectionRange(selStart, selStart);
+        }
+      }
     }
   }
 
@@ -617,20 +784,55 @@
     qrDialog.showModal();
   }
 
+  function buildUpiQrSvg(amount) {
+    if (typeof window.qrcode !== "function") return "";
+    const qr = window.qrcode(0, "M");
+    qr.addData(`upi://pay?pa=spicegarden@upi&pn=Spice%20Garden&am=${Number(amount).toFixed(2)}&cu=INR`);
+    qr.make();
+    return qr.createSvgTag({ cellSize: 3, margin: 1 });
+  }
+
   function renderCheckoutDialog() {
     const s = state.session;
     if (!s) return;
     document.getElementById("checkout-table-label").textContent = `Table ${s.tableNumber}`;
     document.getElementById("checkout-error").textContent = "";
 
-    const simNote = {
-      UPI: `Simulated UPI transfer of <strong>${money(s.total)}</strong> to <code>spicegarden@upi</code>.`,
-      CARD: `Simulated POS card swipe / tap for <strong>${money(s.total)}</strong>.`,
-      CASH: `Simulated cash payment of <strong>${money(s.total)}</strong> collected at the counter.`
-    }[state.payMode];
+    const guestCount = Math.max(1, s.customers.length);
+    const equalShare = s.total / guestCount;
+    const myCustomer = s.customers.find(c => c.customerId === state.seat.customerId);
+    const myShareWithGst = myCustomer ? myCustomer.subtotal * 1.05 : 0;
+
+    let simBoxHtml = "";
+    if (state.payMode === "UPI") {
+      simBoxHtml = `
+        <div class="pay-sim-box pay-upi-qr">
+          ${buildUpiQrSvg(s.total)}
+          <div>
+            <strong>Scan Simulated UPI QR</strong>
+            <div class="muted" style="font-size:12px;margin-top:2px;">VPA: <span class="mono">spicegarden@upi</span></div>
+            <div class="muted" style="font-size:12px;">Amount: <strong class="num">${money(s.total)}</strong></div>
+          </div>
+        </div>
+      `;
+    } else if (state.payMode === "CARD") {
+      simBoxHtml = `
+        <div class="pay-sim-box">
+          <strong>Simulated Card Terminal</strong>
+          <div class="mono muted" style="font-size:12px;margin-top:4px;">VISA / MASTERCARD · •••• •••• •••• 4242 · Tap or Swipe Ready</div>
+        </div>
+      `;
+    } else {
+      simBoxHtml = `
+        <div class="pay-sim-box">
+          <strong>Cash Counter Settlement</strong>
+          <div class="muted" style="font-size:12px;margin-top:4px;">Counter Slip <span class="mono">#T${s.tableNumber}-${s.sessionId}</span> · Pay <strong class="num">${money(s.total)}</strong> at counter.</div>
+        </div>
+      `;
+    }
 
     document.getElementById("checkout-summary").innerHTML = `
-      <div style="border:1px solid var(--line);border-radius:6px;padding:12px;margin-bottom:12px;max-height:180px;overflow-y:auto;">
+      <div style="border:1px solid var(--line);border-radius:6px;padding:12px;margin-bottom:12px;max-height:150px;overflow-y:auto;">
         ${s.consolidatedLines.map(l => `
           <div class="order-line">
             <span>${esc(l.name)} × ${l.quantity}</span>
@@ -638,6 +840,13 @@
           </div>
         `).join("")}
       </div>
+
+      <div class="split-helper">
+        <strong>Bill Split Helper:</strong>
+        Your items (incl. 5% GST): <strong class="num">${money(myShareWithGst)}</strong>
+        ${guestCount > 1 ? ` · Equal split (${guestCount} guests): <strong class="num">${money(equalShare)}</strong> each` : ""}
+      </div>
+
       <div class="total-row"><span>Subtotal</span><span class="num">${money(s.subtotal)}</span></div>
       <div class="total-row"><span>GST (5%)</span><span class="num">${money(s.gst)}</span></div>
       <div class="total-row grand" style="margin-bottom:14px;"><span>Grand Total</span><span class="num">${money(s.total)}</span></div>
@@ -648,12 +857,19 @@
         <button type="button" class="pay-option ${state.payMode === "CARD" ? "active" : ""}" data-paymode="CARD">Card</button>
         <button type="button" class="pay-option ${state.payMode === "CASH" ? "active" : ""}" data-paymode="CASH">Cash</button>
       </div>
-      <div class="pay-sim-box">${simNote}</div>
+      ${simBoxHtml}
       <button type="button" class="btn btn-primary btn-block" id="confirm-pay-btn">Confirm Payment &amp; Release Table</button>
     `;
   }
 
   // ==================== EVENT HANDLERS ====================
+
+  app.addEventListener("input", e => {
+    if (e.target.id === "menu-search") {
+      state.searchQuery = e.target.value;
+      render();
+    }
+  });
 
   app.addEventListener("click", async e => {
     const entryBtn = e.target.closest("[data-entry]");
@@ -723,6 +939,7 @@
     if (addBtn) {
       const itemId = Number(addBtn.dataset.add);
       const quantity = state.picks[itemId] || 1;
+      const dish = state.menu.find(m => m.id === itemId);
       try {
         const updated = await postJson("/api/sessions/order", {
           sessionId: state.seat.sessionId,
@@ -734,7 +951,10 @@
         state.picks[itemId] = 1;
         state.error = "";
         render();
-        toast("Added to shared table bill");
+        toast(`Added ${dish ? dish.name : "item"}`, "View Bill", () => {
+          const panel = document.getElementById("shared-bill-panel");
+          if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
       } catch (err) {
         state.error = err.message;
         render();
@@ -814,9 +1034,7 @@
   });
 
   app.addEventListener("change", e => {
-    if (e.target.id === "fb-category") {
-      state.feedbackCategory = e.target.value;
-    }
+    if (e.target.id === "fb-category") state.feedbackCategory = e.target.value;
   });
 
   app.addEventListener("submit", async e => {
@@ -840,7 +1058,7 @@
         state.feedbackSubmitted = false;
         state.error = "";
         render();
-        toast(`Table ${res.session.tableNumber} booked! Share code ${res.session.joinCode}`);
+        toast(`Table ${res.session.tableNumber} booked! Code: ${res.session.joinCode}`);
       } catch (err) {
         state.error = err.message;
         await refreshTables();
@@ -863,9 +1081,7 @@
         state.session = res.session;
         state.feedbackSubmitted = false;
         state.error = "";
-        if (window.location.search) {
-          window.history.replaceState({}, "", "/");
-        }
+        if (window.location.search) window.history.replaceState({}, "", "/");
         render();
         toast(`Joined Table ${res.session.tableNumber}`);
       } catch (err) {
@@ -952,13 +1168,10 @@
 
     try {
       await Promise.all([refreshMenu(), refreshTables()]);
-      if (state.seat) {
-        await refreshCurrentSession(false);
-      } else {
-        render();
-      }
+      if (state.seat) await refreshCurrentSession(false);
+      else render();
     } catch (err) {
-      app.innerHTML = `<div class="card"><p class="error-msg">${esc(err.message)}</p></div>`;
+      app.innerHTML = `<div class="page"><div class="card"><p class="error-msg">${esc(err.message)}</p></div></div>`;
     }
   }
 
