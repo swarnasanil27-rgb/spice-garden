@@ -28,14 +28,33 @@
     "Gulab Jamun": "/public/dishes/gulab-jamun.svg",
     "Masala Chai": "/public/dishes/masala-chai.svg"
   };
+  const TASTING_NOTES = {
+    "Paneer Tikka": "Charred cottage cheese marinated in hung yogurt, Kashmiri chili, and carom seeds.",
+    "Chicken Wings": "Crisp tandoor-roasted wings glazed with roasted red pepper, garlic, and lime.",
+    "Veg Biryani": "Long-grain basmati layered with seasonal vegetables, saffron milk, and fried shallots.",
+    "Butter Chicken": "Char-grilled chicken simmered in velvety heirloom tomato, fenugreek, and butter gravy."
+  };
+  const SPACE_DESCRIPTIONS = {
+    WINDOW_ALCOVE: "Sunlit street-side booths with intimate 2 and 4-seat timber tables.",
+    GARDEN_COURTYARD: "Breezy lantern-lit courtyard seating surrounded by lush planters.",
+    MAIN_HALL: "Heart of the dining room with warm acoustics and brass pendant glow.",
+    CORNER_LOUNGE: "Generous 6-seat corner tables crafted for family feasts and group celebrations."
+  };
+  const FALLBACK_REVIEWS = [
+    { rating: 5, category: "Food", customerName: "Ananya R.", tableNumber: 4, comment: "The Paneer Tikka came straight off the charcoal and our whole table shared the bill effortlessly from our phones." },
+    { rating: 5, category: "Ambience", customerName: "Kabir M.", tableNumber: 6, comment: "Warm courtyard lighting, attentive kitchen updates, and the Dal Makhani was unforgettable." },
+    { rating: 5, category: "Service", customerName: "Meera S.", tableNumber: 2, comment: "Loved scanning the table QR code so everyone at our table could add their own dishes to one shared bill." }
+  ];
   const AVATAR_PALETTE = ["#153124", "#b07d2f", "#227647", "#8b241a", "#35536b", "#6b4263"];
 
   const state = {
     menu: [],
     tables: [],
+    reviews: [],
     seat: loadSeat(),
     session: null,
-    entryMode: "book",
+    pageView: "home", // "home" | "tables"
+    entryMode: "book", // "book" | "join"
     selectedTable: null,
     joinPrefill: "",
     category: "ALL",
@@ -59,6 +78,8 @@
   const app = document.getElementById("app");
   const livePill = document.getElementById("live-pill");
   const liveLabel = document.getElementById("live-label");
+  const topbarNav = document.getElementById("topbar-nav");
+  const navTablesBtn = document.getElementById("nav-tables-btn");
   const qrDialog = document.getElementById("qr-dialog");
   const checkoutDialog = document.getElementById("checkout-dialog");
 
@@ -101,8 +122,7 @@
   }
 
   function avatarColor(id) {
-    const idx = Math.abs(Number(id || 0)) % AVATAR_PALETTE.length;
-    return AVATAR_PALETTE[idx];
+    return AVATAR_PALETTE[Math.abs(Number(id || 0)) % AVATAR_PALETTE.length];
   }
 
   function initials(name) {
@@ -187,7 +207,39 @@
       );
       if (!stillAvail) state.selectedTable = null;
     }
-    if (!state.seat) render();
+    if (!state.seat) {
+      if (state.pageView === "home" && document.getElementById("home-open-count")) {
+        updateHomeCountsInPlace();
+      } else {
+        render();
+      }
+    }
+  }
+
+  function updateHomeCountsInPlace() {
+    const availCount = state.tables.filter(t => t.status === "AVAILABLE").length;
+    const totalCount = state.tables.length || 10;
+    const countEl = document.getElementById("home-open-count");
+    if (countEl) countEl.textContent = `${availCount} of ${totalCount} Open`;
+    const spacesMap = new Map();
+    for (const t of state.tables) {
+      if (!spacesMap.has(t.zone)) spacesMap.set(t.zone, { open: 0, total: 0 });
+      const entry = spacesMap.get(t.zone);
+      entry.total++;
+      if (t.status === "AVAILABLE") entry.open++;
+    }
+    for (const [zone, stats] of spacesMap.entries()) {
+      const badge = document.querySelector(`[data-space-status="${zone}"]`);
+      if (badge) badge.textContent = `${stats.open} of ${stats.total} open`;
+    }
+  }
+
+  async function refreshReviews() {
+    try {
+      state.reviews = await api("/api/reviews");
+    } catch {
+      state.reviews = [];
+    }
   }
 
   async function refreshCurrentSession(silent) {
@@ -239,7 +291,7 @@
     ).join("")}</span>`;
   }
 
-  function renderDishCard(item, orderedQty, interactive) {
+  function renderDishCard(item, orderedQty) {
     const catLabels = {
       STARTER: "Starter",
       MAIN_COURSE: "Main Course",
@@ -270,26 +322,247 @@
         </div>
         <div class="dish-foot">
           <span class="dish-price num">${money(item.price)}</span>
-          ${interactive ? `
-            <div style="display:flex;align-items:center;gap:8px;">
-              <div class="stepper">
-                <button type="button" data-dec="${item.id}" aria-label="Decrease">−</button>
-                <span>${qty}</span>
-                <button type="button" data-inc="${item.id}" aria-label="Increase">+</button>
-              </div>
-              <button type="button" class="btn btn-primary btn-sm" data-add="${item.id}">Add</button>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <div class="stepper">
+              <button type="button" data-dec="${item.id}" aria-label="Decrease">−</button>
+              <span>${qty}</span>
+              <button type="button" class="inc-btn" data-inc="${item.id}" aria-label="Increase">+</button>
             </div>
-          ` : `
-            <a class="btn btn-outline btn-sm" href="#floor-plan">Select table to order</a>
-          `}
+            <button type="button" class="btn btn-primary btn-sm" data-add="${item.id}">Add</button>
+          </div>
         </div>
       </article>
     `;
   }
 
-  // ==================== RENDERING: LANDING + ARCHITECTURAL FLOOR PLAN ====================
+  // ==================== VIEW 1: EDITORIAL RESTAURANT HOMEPAGE ====================
 
-  function renderSeatingView(animateLanding) {
+  function renderHomeView(animateLanding) {
+    connectSse("tables");
+    const availCount = state.tables.filter(t => t.status === "AVAILABLE").length;
+    const totalCount = state.tables.length || 10;
+
+    // 4 signature dishes rendered in printed tasting-menu ledger style
+    const signatureFour = state.menu.slice(0, 4);
+    const tastingHtml = signatureFour.map((item, idx) => {
+      const img = DISH_IMAGES[item.name] || "/public/dishes/veg-biryani.jpg";
+      const isVeg = item.type === "VEG";
+      const note = TASTING_NOTES[item.name] || (isVeg ? "Freshly prepared vegetarian speciality." : "Slow-roasted with house spices.");
+      return `
+        <article class="tasting-item reveal-item" style="--d:${idx};">
+          <img class="tasting-thumb" src="${img}" alt="${esc(item.name)}">
+          <div>
+            <div class="tasting-line">
+              <span class="diet-dot ${isVeg ? "veg" : "nonveg"}" title="${isVeg ? "Vegetarian" : "Non-Vegetarian"}"></span>
+              <h3>${esc(item.name)}</h3>
+              <span class="tasting-dots" aria-hidden="true"></span>
+              <span class="tasting-price num">${money(item.price)}</span>
+            </div>
+            <p class="tasting-note">${esc(note)}</p>
+          </div>
+        </article>
+      `;
+    }).join("");
+
+    // Group tables by dining space for live availability badges
+    const spacesMap = new Map();
+    for (const t of state.tables) {
+      if (!spacesMap.has(t.zone)) {
+        spacesMap.set(t.zone, { zone: t.zone, label: t.zoneLabel, open: 0, total: 0 });
+      }
+      const entry = spacesMap.get(t.zone);
+      entry.total++;
+      if (t.status === "AVAILABLE") entry.open++;
+    }
+
+    const reviews = state.reviews.length ? state.reviews.slice(0, 3) : FALLBACK_REVIEWS;
+
+    app.innerHTML = `
+      <section class="hero-band ${animateLanding ? "anim-enter" : ""}">
+        <div class="hero-inner">
+          <div class="hero-copy">
+            <p class="eyebrow" style="color:#e4be73;">Est. 2026 · Clay Oven &amp; Spice House</p>
+            <h1>Slow-cooked heritage,<br><em>served warm.</em></h1>
+            <p class="hero-lead">
+              At Spice Garden, mornings begin by dry-roasting whole spices and stoking the charcoal tandoor. Join us in the courtyard or dining hall for food made to share around one table.
+            </p>
+            <div class="hero-actions">
+              <button class="btn btn-brass" type="button" data-go-tables="book">Book a Table →</button>
+              <button class="btn btn-hero-outline" type="button" data-go-tables="join">Join with Table Code</button>
+              <a class="btn btn-hero-outline" href="#signature-menu">View Tasting Menu</a>
+            </div>
+            <div class="hero-facts">
+              <div><strong id="home-open-count">${availCount} of ${totalCount} Open</strong>Live dining tables</div>
+              <div><strong>16 House Dishes</strong>Veg &amp; Non-Veg kitchen</div>
+              <div><strong>Shared Table QR</strong>Order together from any phone</div>
+            </div>
+          </div>
+          <div class="hero-media">
+            <div class="hero-photo-frame">
+              <img src="/public/dishes/hero-feast.jpg" alt="Spice Garden Indian dining feast on wooden table">
+            </div>
+            <div class="hero-badge">
+              <strong>4.8 ★</strong>
+              <span>Guest favourite kitchen</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="editorial-section" id="story">
+        <div class="story-grid">
+          <div class="story-photo-card reveal-item reveal-left reveal-scale" style="--d:0;">
+            <img src="/public/dishes/tandoor-spices.jpg" alt="Whole roasted Indian spices and tandoor prep at Spice Garden">
+            <div class="story-caption">
+              <span>Whole spices roasted fresh daily</span>
+              <span class="mono">07:00 AM PREP</span>
+            </div>
+          </div>
+          <div class="story-copy">
+            <p class="eyebrow reveal-item reveal-right" style="--d:0;">Our Craft &amp; Story</p>
+            <h2 class="reveal-item reveal-right" style="--d:1;">Patience is our primary ingredient.</h2>
+            <p class="reveal-item reveal-right" style="--d:2;">
+              Every curry base simmers slowly in heavy copper handis, while skewers of cottage cheese and spiced meats are blistered over glowing charcoal moments before reaching your table.
+            </p>
+            <p class="reveal-item reveal-right" style="--d:3;">
+              Whether you’re catching up over masala chai or hosting a full courtyard dinner, everyone at your table can scan one code, order at their own pace, and settle together seamlessly.
+            </p>
+            <blockquote class="pull-quote reveal-item" style="--d:4;">
+              “Good Indian dining isn’t rushed — it’s warm bread passed across the table, fragrant saffron steam, and shared plates still sizzling from the clay oven.”
+            </blockquote>
+          </div>
+        </div>
+      </section>
+
+      <section class="tasting-band" id="signature-menu">
+        <div class="editorial-section">
+          <div class="tasting-ledger reveal-item reveal-scale" style="--d:0;">
+            <div class="tasting-header">
+              <div>
+                <p class="eyebrow">Signature Tasting Selection</p>
+                <h2>From the Tandoor &amp; Handi</h2>
+              </div>
+              <p class="muted" style="margin:0;max-width:340px;font-size:13px;">
+                Four house favourites — explore all ${state.menu.length || 16} starters, mains, desserts, and drinks once you take your seat.
+              </p>
+            </div>
+            <div class="tasting-grid">
+              ${tastingHtml || '<p class="muted">Loading signature dishes…</p>'}
+            </div>
+            <div class="tasting-footer reveal-item" style="--d:2;">
+              <span class="muted" style="font-size:13px;">
+                Includes vegetarian &amp; non-vegetarian starters, slow-cooked mains, desserts &amp; house chai.
+              </span>
+              <button class="btn btn-primary" type="button" data-go-tables="book">
+                Select a Table to Order All ${state.menu.length || 16} Dishes →
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="editorial-section" id="spaces">
+        <div class="reveal-item" style="--d:0;">
+          <p class="eyebrow">Four Distinct Rooms</p>
+          <h2 style="font-size:clamp(28px,3.4vw,40px);">Choose your atmosphere</h2>
+          <p class="muted" style="margin:6px 0 0;max-width:560px;">
+            From sunlit window booths to our lantern-lit garden courtyard, check live table availability across every room.
+          </p>
+        </div>
+
+        <div class="spaces-layout">
+          <div class="spaces-feature-photo reveal-item reveal-left reveal-scale" style="--d:0;">
+            <img src="/public/dishes/interior-dining.jpg" alt="Spice Garden warm candlelit dining room interior">
+          </div>
+          <div class="spaces-cards">
+            ${[...spacesMap.values()].map((sp, idx) => `
+              <article class="space-card reveal-item" style="--d:${idx};">
+                <span class="space-status num" data-space-status="${esc(sp.zone)}">${sp.open} of ${sp.total} open</span>
+                <h3>${esc(sp.label)}</h3>
+                <p class="muted" style="margin:0;font-size:13px;line-height:1.55;">
+                  ${esc(SPACE_DESCRIPTIONS[sp.zone] || "Comfortable dining tables with table-side QR ordering.")}
+                </p>
+                <button type="button" class="btn btn-outline btn-sm" style="margin-top:auto;" data-go-tables="book">
+                  View Tables →
+                </button>
+              </article>
+            `).join("")}
+          </div>
+        </div>
+      </section>
+
+      <section class="reviews-band" id="reviews">
+        <div class="editorial-section">
+          <div class="reveal-item" style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:16px;--d:0;">
+            <div>
+              <p class="eyebrow" style="color:#e4be73;">From Our Guests</p>
+              <h2>Voices from the dining room</h2>
+            </div>
+            <button type="button" class="btn btn-brass" data-go-tables="book">Reserve Your Seat →</button>
+          </div>
+          <div class="reviews-grid">
+            ${reviews.map((r, idx) => `
+              <article class="review-card reveal-item" style="--d:${idx + 1};">
+                <div style="color:#e4be73;font-size:15px;">${"★".repeat(r.rating)}${"☆".repeat(5 - r.rating)}</div>
+                <p class="review-quote">“${esc(r.comment || "Wonderful flavours and effortless table sharing.")}”</p>
+                <div class="review-author">
+                  <strong>${esc(r.customerName)}</strong> · Table ${r.tableNumber} · ${esc(r.category)}
+                </div>
+              </article>
+            `).join("")}
+          </div>
+        </div>
+      </section>
+
+      <footer class="footer-rich reveal-item" style="--d:0;">
+        <div class="footer-grid">
+          <div>
+            <strong style="font-family:var(--serif);font-size:20px;color:#fff;">Spice Garden</strong>
+            <p style="margin:10px 0 0;font-size:13px;line-height:1.7;max-width:300px;">
+              Honest Indian flavours cooked fresh in small batches, served with shared table billing from any phone.
+            </p>
+          </div>
+          <div>
+            <h4>Hours &amp; Kitchen</h4>
+            <ul>
+              <li>Tue – Sun: 11:30 AM – 11:30 PM</li>
+              <li>Monday: Closed for spice prep</li>
+              <li>Last tandoor order: 11:00 PM</li>
+            </ul>
+          </div>
+          <div>
+            <h4>Dining Rooms</h4>
+            <ul>
+              <li>Window Alcove (2 &amp; 4 seats)</li>
+              <li>Garden Courtyard (4 &amp; 6 seats)</li>
+              <li>Main Hall &amp; Corner Lounge</li>
+            </ul>
+          </div>
+          <div>
+            <h4>Guest Actions</h4>
+            <ul>
+              <li><a href="#" data-go-tables="book" style="color:#e4be73;">Book a Table →</a></li>
+              <li><a href="#" data-go-tables="join">Join with Table Code</a></li>
+              <li><a href="/admin">Staff &amp; Admin Console</a></li>
+            </ul>
+          </div>
+        </div>
+        <div class="footer-bottom">
+          <span>Spice Garden · Indian Kitchen &amp; Dining</span>
+          <span>Live floor availability · Table-side QR ordering</span>
+        </div>
+      </footer>
+
+      <div class="mobile-home-cta" aria-label="Quick table booking actions">
+        <button class="btn btn-primary btn-sm" type="button" data-go-tables="book">Book a Table →</button>
+        <button class="btn btn-outline btn-sm" type="button" data-go-tables="join">Join Code / QR</button>
+      </div>
+    `;
+  }
+
+  // ==================== VIEW 2: DEDICATED FLOOR PLAN & JOIN TABLE ====================
+
+  function renderTablesView(animateEntry) {
     connectSse("tables");
     const zones = [];
     const byZone = new Map();
@@ -385,93 +658,47 @@
     `;
 
     app.innerHTML = `
-      <section class="hero-band ${animateLanding ? "anim-enter" : ""}">
-        <div class="hero-inner">
-          <div class="hero-copy">
-            <p class="eyebrow" style="color:#e4be73;">Spice Garden · Indian Kitchen &amp; Dining</p>
-            <h1>Honest flavours.<br><em>Shared at your table.</em></h1>
-            <p class="hero-lead">
-              Freshly roasted spices, clay-oven starters, and slow-simmered curries. Pick your table on our live floor plan and invite everyone at your table to order onto one shared bill.
+      <div class="page ${animateEntry ? "anim-stagger" : ""}">
+        <div style="margin-bottom:14px;">
+          <button type="button" class="btn btn-outline btn-sm" id="back-home-btn">← Back to Spice Garden Home</button>
+        </div>
+
+        <div class="seating-intro">
+          <div>
+            <p class="eyebrow">Live Dining Floor</p>
+            <h1 style="font-size:clamp(28px,3.4vw,38px);">Choose your table</h1>
+            <p class="muted" style="margin:6px 0 0;">
+              ${availCount} available · ${occCount} occupied · Select a green table to open a shared bill or join with a code
             </p>
-            <div class="hero-actions">
-              <a class="btn btn-brass" href="#floor-plan">Book or Join a Table ↓</a>
-              <a class="btn btn-hero-outline" href="#preview-menu">Explore Menu ↓</a>
-            </div>
-            <div class="hero-facts">
-              <div><strong>${availCount} / ${state.tables.length || 10} Open</strong>Live tables ready</div>
-              <div><strong>Shared QR Bill</strong>Order from any phone</div>
-              <div><strong>11:30 – 23:30</strong>Served fresh daily</div>
-            </div>
           </div>
-          <div class="hero-media">
-            <div class="hero-photo-frame">
-              <img src="/public/dishes/hero-feast.jpg" alt="Spice Garden Indian dining feast">
-            </div>
-            <div class="hero-badge">
-              <strong>4.8 ★</strong>
-              <span>Guest favourite kitchen</span>
-            </div>
+          <div class="mode-tabs" role="tablist">
+            <button class="mode-tab ${state.entryMode === "book" ? "active" : ""}" type="button" data-entry="book">Book a Table</button>
+            <button class="mode-tab ${state.entryMode === "join" ? "active" : ""}" type="button" data-entry="join">Join with Code / QR</button>
           </div>
         </div>
-      </section>
 
-      <div class="page-full">
-        <section class="section-wrap ${animateLanding ? "reveal" : ""}" id="floor-plan">
-          <div class="seating-intro">
-            <div>
-              <p class="eyebrow">Live Dining Room</p>
-              <h2>Choose your table</h2>
-              <p class="muted" style="margin:6px 0 0;">
-                ${availCount} available · ${occCount} occupied · Select a green table to begin or enter a join code
-              </p>
-            </div>
-            <div class="mode-tabs" role="tablist">
-              <button class="mode-tab ${state.entryMode === "book" ? "active" : ""}" type="button" data-entry="book">Book a Table</button>
-              <button class="mode-tab ${state.entryMode === "join" ? "active" : ""}" type="button" data-entry="join">Join with Code / QR</button>
-            </div>
-          </div>
-
-          <div class="seating-grid">
-            <section class="card">
-              <div class="floor-header">
-                <div>
-                  <h3 style="font-size:21px;">Architectural Floor Plan</h3>
-                  <p class="muted" style="margin:2px 0 0;font-size:13px;">Chair pips show seating capacity · Live updates</p>
-                </div>
-                <div class="legend">
-                  <span class="legend-item"><span class="swatch available"></span> Available</span>
-                  <span class="legend-item"><span class="swatch occupied"></span> Occupied</span>
-                  <span class="legend-item"><span class="swatch selected"></span> Selected</span>
-                </div>
+        <div class="seating-grid">
+          <section class="card">
+            <div class="floor-header">
+              <div>
+                <h3 style="font-size:21px;">Architectural Floor Plan</h3>
+                <p class="muted" style="margin:2px 0 0;font-size:13px;">Chair pips show seating capacity · Live updates</p>
               </div>
-              ${state.tables.length ? floorHtml : '<p class="muted">Loading tables…</p>'}
-            </section>
-            ${rightPanel}
-          </div>
-        </section>
-
-        <section class="section-wrap ${animateLanding ? "reveal" : ""}" id="preview-menu">
-          <div class="seating-intro" style="margin-bottom:18px;">
-            <div>
-              <p class="eyebrow">From Our Kitchen</p>
-              <h2>Signature Dishes</h2>
-              <p class="muted" style="margin:6px 0 0;">Showing 4 signature picks · Select a table above to browse all ${state.menu.length} veg &amp; non-veg dishes.</p>
+              <div class="legend">
+                <span class="legend-item"><span class="swatch available"></span> Available</span>
+                <span class="legend-item"><span class="swatch occupied"></span> Occupied</span>
+                <span class="legend-item"><span class="swatch selected"></span> Selected</span>
+              </div>
             </div>
-          </div>
-          <div class="menu-grid ${animateLanding ? "anim-stagger" : ""}">
-            ${state.menu.slice(0, 4).map((item, idx) => `<div style="--i:${idx};">${renderDishCard(item, 0, false)}</div>`).join("")}
-          </div>
-        </section>
-
-        <footer class="site-footer">
-          <div><strong>Spice Garden</strong> · Indian Kitchen &amp; Dining</div>
-          <div>Freshly prepared to order · Table-side QR shared billing</div>
-        </footer>
+            ${state.tables.length ? floorHtml : '<p class="muted">Loading tables…</p>'}
+          </section>
+          ${rightPanel}
+        </div>
       </div>
     `;
   }
 
-  // ==================== RENDERING: COMPLETED RECEIPT + FEEDBACK ====================
+  // ==================== VIEW 3: COMPLETED RECEIPT + FEEDBACK ====================
 
   function renderCompletedView(session) {
     const fbHtml = state.feedbackSubmitted ? `
@@ -479,13 +706,13 @@
         <p class="eyebrow" style="color:var(--avail-ink);">Feedback Saved</p>
         <h3 style="color:var(--avail-ink);">Thank you for dining with us</h3>
         <p style="margin:8px 0 14px;font-size:14px;">Your ${state.feedbackRating}★ rating and feedback have been shared with the Spice Garden team.</p>
-        <button class="btn btn-primary" type="button" id="new-visit-btn">Return to Floor Plan</button>
+        <button class="btn btn-primary" type="button" id="new-visit-btn">Return to Spice Garden Home</button>
       </div>
     ` : `
       <div class="card">
         <p class="eyebrow">Share Your Experience</p>
         <h3>How was your meal?</h3>
-        <p class="muted" style="font-size:13px;margin:6px 0 14px;">Rate your experience at Table ${session.tableNumber}. Feedback appears immediately on our Admin Console.</p>
+        <p class="muted" style="font-size:13px;margin:6px 0 14px;">Rate your experience at Table ${session.tableNumber}. Feedback appears immediately on our Admin Console and Homepage.</p>
         <form id="feedback-form" class="field" style="gap:14px;">
           <div class="field">
             <label>Your rating</label>
@@ -510,7 +737,7 @@
           <p class="error-msg" id="fb-error"></p>
           <div style="display:flex;gap:10px;flex-wrap:wrap;">
             <button class="btn btn-primary" type="submit">Submit Feedback</button>
-            <button class="btn btn-outline" type="button" id="new-visit-btn">Skip & Return to Floor Plan</button>
+            <button class="btn btn-outline" type="button" id="new-visit-btn">Skip & Return Home</button>
           </div>
         </form>
       </div>
@@ -545,7 +772,7 @@
     `;
   }
 
-  // ==================== RENDERING: ACTIVE ORDERING WORKSPACE ====================
+  // ==================== VIEW 4: ACTIVE SEATED WORKSPACE ====================
 
   function orderProgressHtml(status) {
     const steps = ["PLACED", "PREPARING", "READY", "SERVED"];
@@ -589,7 +816,6 @@
     const myOrders = (session.customers.find(c => c.customerId === myCustomerId)?.orders || []);
     const hasMyPlacedOrder = myOrders.some(o => o.status === "PLACED" && o.lines.length > 0);
 
-    // Count items already ordered by current guest across active orders
     const myItemCounts = new Map();
     for (const o of myOrders) {
       if (o.status === "CANCELLED") continue;
@@ -695,7 +921,7 @@
 
             <div class="menu-grid">
               ${filteredMenu.length
-                ? filteredMenu.map(item => renderDishCard(item, myItemCounts.get(item.id) || 0, true)).join("")
+                ? filteredMenu.map(item => renderDishCard(item, myItemCounts.get(item.id) || 0)).join("")
                 : `<div class="card" style="grid-column:1/-1;"><p class="muted" style="margin:0;">No dishes match your filter.</p></div>`}
             </div>
           </section>
@@ -754,7 +980,7 @@
   }
 
   function observeReveals() {
-    const targets = document.querySelectorAll(".reveal");
+    const targets = document.querySelectorAll(".reveal, .reveal-item");
     if (!targets.length) return;
     if (typeof IntersectionObserver !== "function") {
       targets.forEach(el => el.classList.add("in-view"));
@@ -767,9 +993,27 @@
           io.unobserve(entry.target);
         }
       }
-    }, { threshold: 0.08 });
+    }, { threshold: 0.12, rootMargin: "0px 0px -30px 0px" });
     targets.forEach(el => io.observe(el));
   }
+
+  let scrollTicking = false;
+  function updateScrollProgress() {
+    const bar = document.getElementById("scroll-progress");
+    if (!bar) return;
+    const max = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+    const ratio = Math.min(1, Math.max(0, window.scrollY / max));
+    bar.style.transform = `scaleX(${ratio.toFixed(4)})`;
+  }
+  window.addEventListener("scroll", () => {
+    if (!scrollTicking) {
+      scrollTicking = true;
+      window.requestAnimationFrame(() => {
+        updateScrollProgress();
+        scrollTicking = false;
+      });
+    }
+  }, { passive: true });
 
   function render() {
     const activeSearch = document.activeElement && document.activeElement.id === "menu-search";
@@ -777,17 +1021,29 @@
     const showMobileBar = Boolean(state.seat && state.session && state.session.status === "ACTIVE");
     document.body.classList.toggle("has-mobile-bar", showMobileBar);
 
-    const nextMode = (!state.seat || !state.session)
-      ? "seating"
-      : (state.session.status === "ACTIVE" ? "session" : "completed");
+    const nextMode = (state.seat && state.session)
+      ? (state.session.status === "ACTIVE" ? "session" : "completed")
+      : (state.pageView === "tables" ? "tables" : "home");
+
+    const isHome = nextMode === "home";
+    document.body.classList.toggle("has-mobile-home", isHome);
+    if (topbarNav) topbarNav.style.display = isHome ? "" : "none";
+    if (navTablesBtn) navTablesBtn.hidden = !isHome;
+
     const isEntering = state.lastViewMode !== nextMode;
     state.lastViewMode = nextMode;
 
-    if (nextMode === "seating") {
+    if (nextMode === "home") {
       clearInterval(state.durationTimer);
       state.lastBillTotal = null;
-      renderSeatingView(isEntering);
+      renderHomeView(isEntering);
       observeReveals();
+      updateScrollProgress();
+    } else if (nextMode === "tables") {
+      clearInterval(state.durationTimer);
+      state.lastBillTotal = null;
+      renderTablesView(isEntering);
+      updateScrollProgress();
     } else {
       const prevTotal = state.lastBillTotal;
       const newTotal = state.session.total;
@@ -909,6 +1165,25 @@
 
   // ==================== EVENT HANDLERS ====================
 
+  function openTablesView(mode) {
+    state.pageView = "tables";
+    state.entryMode = mode === "join" ? "join" : "book";
+    state.error = "";
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    render();
+  }
+
+  navTablesBtn.addEventListener("click", () => openTablesView("book"));
+  document.getElementById("brand-home").addEventListener("click", e => {
+    if (!state.seat && state.pageView === "tables") {
+      e.preventDefault();
+      state.pageView = "home";
+      state.error = "";
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      render();
+    }
+  });
+
   app.addEventListener("input", e => {
     if (e.target.id === "menu-search") {
       state.searchQuery = e.target.value;
@@ -917,6 +1192,21 @@
   });
 
   app.addEventListener("click", async e => {
+    const goTablesBtn = e.target.closest("[data-go-tables]");
+    if (goTablesBtn) {
+      e.preventDefault();
+      openTablesView(goTablesBtn.dataset.goTables);
+      return;
+    }
+
+    if (e.target.id === "back-home-btn") {
+      state.pageView = "home";
+      state.error = "";
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      render();
+      return;
+    }
+
     const entryBtn = e.target.closest("[data-entry]");
     if (entryBtn) {
       state.entryMode = entryBtn.dataset.entry;
@@ -1065,13 +1355,26 @@
       return;
     }
 
-    if (e.target.id === "leave-view-btn" || e.target.id === "new-visit-btn") {
+    if (e.target.id === "leave-view-btn") {
       saveSeat(null);
       state.session = null;
       state.receiptNote = "";
       state.feedbackSubmitted = false;
       state.error = "";
+      state.pageView = "tables";
       await refreshTables();
+      return;
+    }
+
+    if (e.target.id === "new-visit-btn") {
+      saveSeat(null);
+      state.session = null;
+      state.receiptNote = "";
+      state.feedbackSubmitted = false;
+      state.error = "";
+      state.pageView = "home";
+      await Promise.all([refreshTables(), refreshReviews()]);
+      render();
       return;
     }
 
@@ -1155,6 +1458,7 @@
           comment
         });
         state.feedbackSubmitted = true;
+        await refreshReviews();
         render();
         toast("Thank you for your feedback");
       } catch (err) {
@@ -1212,12 +1516,13 @@
     const joinParam = params.get("join");
     if (joinParam) {
       saveSeat(null);
+      state.pageView = "tables";
       state.entryMode = "join";
       state.joinPrefill = joinParam.trim().toUpperCase();
     }
 
     try {
-      await Promise.all([refreshMenu(), refreshTables()]);
+      await Promise.all([refreshMenu(), refreshTables(), refreshReviews()]);
       if (state.seat) await refreshCurrentSession(false);
       else render();
     } catch (err) {

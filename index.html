@@ -14,17 +14,25 @@
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="/">
+    <a class="brand" href="/" id="brand-home">
       <span class="brand-mark">S</span>
       <span class="brand-text">
         <strong>Spice Garden</strong>
-        <small>Customer Dining Portal</small>
+        <small>Indian Kitchen &amp; Dining</small>
       </span>
     </a>
+    <nav class="topbar-nav" id="topbar-nav" aria-label="Restaurant sections">
+      <a href="#story">Our Story</a>
+      <a href="#signature-menu">Menu</a>
+      <a href="#spaces">Dining Spaces</a>
+      <a href="#reviews">Guest Voices</a>
+    </nav>
     <div class="topbar-right">
       <span class="live-pill" id="live-pill"><span class="live-dot"></span><span id="live-label">Connecting</span></span>
-      <a class="btn btn-outline btn-sm" href="/admin">Admin Portal</a>
+      <button class="btn btn-primary btn-sm" id="nav-tables-btn" type="button">Book / Join Table</button>
+      <a class="btn btn-outline btn-sm" href="/admin">Admin</a>
     </div>
+    <span class="scroll-progress" id="scroll-progress" aria-hidden="true"></span>
   </header>
 
   <main id="app">

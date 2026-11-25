@@ -76,6 +76,7 @@ public class Main {
         server.createContext("/api/sessions/checkout", ex -> api(ex, Main::handleCheckout));
         server.createContext("/api/sessions", ex -> api(ex, Main::handleCreateSession));
         server.createContext("/api/feedback", ex -> api(ex, Main::handleSubmitFeedback));
+        server.createContext("/api/reviews", ex -> api(ex, Main::handlePublicReviews));
         server.createContext("/api/events", Main::handleCustomerEvents);
 
         // Admin Portal APIs
@@ -268,6 +269,18 @@ public class Main {
         Feedback saved = repository.saveFeedback(sessionId, tableNumber, customerName, rating, category, comment);
         sseHub.broadcast("admin", "update", "{\"type\":\"feedback_added\",\"sessionId\":" + sessionId + "}");
         send(ex, 201, feedbackJson(saved));
+    }
+
+    static void handlePublicReviews(HttpExchange ex) throws Exception {
+        requireMethod(ex, "GET");
+        List<Feedback> list = repository.listFeedback(4);
+        int limit = Math.min(6, list.size());
+        StringBuilder b = new StringBuilder("[");
+        for (int i = 0; i < limit; i++) {
+            if (i > 0) b.append(',');
+            b.append(feedbackJson(list.get(i)));
+        }
+        send(ex, 200, b.append(']').toString());
     }
 
     static void handleCustomerEvents(HttpExchange ex) throws IOException {
