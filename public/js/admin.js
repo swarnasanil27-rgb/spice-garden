@@ -314,7 +314,7 @@
         <form id="history-filter-form" class="filter-bar">
           <div class="field">
             <label for="h-q">Search guest, code, session #, dish</label>
-            <input id="h-q" type="text" value="${esc(f.q)}" placeholder="e.g. Swarna, Biryani, T4-...">
+            <input id="h-q" type="text" value="${esc(f.q)}" placeholder="e.g. Aarav, Biryani, T4-...">
           </div>
           <div class="field">
             <label for="h-table">Table</label>

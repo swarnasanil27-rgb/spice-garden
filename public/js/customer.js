@@ -245,7 +245,7 @@
         <form id="book-form" class="field" style="gap:14px;">
           <div class="field">
             <label for="book-name">Your name</label>
-            <input id="book-name" type="text" maxlength="80" required placeholder="e.g. Swarna">
+            <input id="book-name" type="text" maxlength="80" required placeholder="e.g. Aarav">
           </div>
           <button class="btn btn-primary btn-block" type="submit" ${state.selectedTable ? "" : "disabled"}>
             ${state.selectedTable ? `Book Table ${state.selectedTable} & Start Ordering` : "Select an available table first"}
