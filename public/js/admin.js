@@ -14,7 +14,8 @@
     historyFilters: { q: "", table: "", mode: "ALL", status: "ALL", from: "", to: "" },
     loginError: "",
     sse: null,
-    durationTimer: null
+    durationTimer: null,
+    lastTab: null
   };
 
   const app = document.getElementById("admin-app");
@@ -221,15 +222,15 @@
     `;
   }
 
-  function renderFloorTab(tables) {
+  function renderFloorTab(tables, animate) {
     return `
-      <div class="admin-tables-grid">
-        ${tables.map(t => {
+      <div class="admin-tables-grid ${animate ? "anim-stagger" : ""}">
+        ${tables.map((t, idx) => {
           const s = t.activeSession;
           const occ = t.status === "OCCUPIED" && s;
           if (!occ) {
             return `
-              <article class="admin-table-card available">
+              <article class="admin-table-card available" style="--i:${idx};">
                 <div style="display:flex;justify-content:space-between;align-items:center;">
                   <strong style="font-family:var(--serif);font-size:20px;color:var(--avail-ink);">${esc(t.label)}</strong>
                   <span class="table-badge" style="color:var(--avail-ink);border-color:var(--avail-border);">Available</span>
@@ -242,7 +243,7 @@
 
           const guests = s.customers.map(c => esc(c.name)).join(", ");
           return `
-            <article class="admin-table-card occupied">
+            <article class="admin-table-card occupied" style="--i:${idx};">
               <div style="display:flex;justify-content:space-between;align-items:center;">
                 <div>
                   <strong style="font-family:var(--serif);font-size:20px;color:var(--occ-ink);">${esc(t.label)}</strong>
@@ -472,8 +473,10 @@
 
     const s = d.stats;
     const kitchenPendingCount = collectKitchenTickets(d.tables).filter(x => x.order.status !== "SERVED").length;
+    const animateTab = state.lastTab !== state.tab;
+    state.lastTab = state.tab;
     let bodyHtml = "";
-    if (state.tab === "floor") bodyHtml = renderFloorTab(d.tables);
+    if (state.tab === "floor") bodyHtml = renderFloorTab(d.tables, animateTab);
     else if (state.tab === "kitchen") bodyHtml = renderKitchenTab(d.tables);
     else if (state.tab === "history") bodyHtml = renderHistoryTab();
     else if (state.tab === "feedback") bodyHtml = renderFeedbackTab();

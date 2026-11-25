@@ -41,7 +41,9 @@
     error: "",
     sse: null,
     sseChannel: null,
-    durationTimer: null
+    durationTimer: null,
+    lastViewMode: null,
+    lastBillTotal: null
   };
 
   const app = document.getElementById("app");
@@ -277,7 +279,7 @@
 
   // ==================== RENDERING: LANDING + ARCHITECTURAL FLOOR PLAN ====================
 
-  function renderSeatingView() {
+  function renderSeatingView(animateLanding) {
     connectSse("tables");
     const zones = [];
     const byZone = new Map();
@@ -373,7 +375,7 @@
     `;
 
     app.innerHTML = `
-      <section class="hero-band">
+      <section class="hero-band ${animateLanding ? "anim-enter" : ""}">
         <div class="hero-inner">
           <div class="hero-copy">
             <p class="eyebrow" style="color:#e4be73;">Spice Garden · Indian Kitchen &amp; Dining</p>
@@ -404,7 +406,7 @@
       </section>
 
       <div class="page-full">
-        <section class="section-wrap" id="floor-plan">
+        <section class="section-wrap ${animateLanding ? "reveal" : ""}" id="floor-plan">
           <div class="seating-intro">
             <div>
               <p class="eyebrow">Live Dining Room</p>
@@ -438,7 +440,7 @@
           </div>
         </section>
 
-        <section class="section-wrap" id="preview-menu">
+        <section class="section-wrap ${animateLanding ? "reveal" : ""}" id="preview-menu">
           <div class="seating-intro" style="margin-bottom:18px;">
             <div>
               <p class="eyebrow">From Our Kitchen</p>
@@ -446,8 +448,8 @@
               <p class="muted" style="margin:6px 0 0;">Preview today’s menu, then select a table above to start ordering.</p>
             </div>
           </div>
-          <div class="menu-grid">
-            ${state.menu.map(item => renderDishCard(item, 0, false)).join("")}
+          <div class="menu-grid ${animateLanding ? "anim-stagger" : ""}">
+            ${state.menu.map((item, idx) => `<div style="--i:${idx};">${renderDishCard(item, 0, false)}</div>`).join("")}
           </div>
         </section>
 
@@ -542,7 +544,7 @@
     return `
       <div class="order-progress">
         ${steps.map((s, i) => `
-          <div class="prog-step ${i < idx ? "done" : (i === idx ? "current" : "")}">${labels[i]}</div>
+          <div class="prog-step ${i < idx ? "done" : (i === idx ? "current" : "")}" data-step="${s}">${labels[i]}</div>
         `).join("")}
       </div>
     `;
@@ -741,18 +743,51 @@
     `;
   }
 
+  function observeReveals() {
+    const targets = document.querySelectorAll(".reveal");
+    if (!targets.length) return;
+    if (typeof IntersectionObserver !== "function") {
+      targets.forEach(el => el.classList.add("in-view"));
+      return;
+    }
+    const io = new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) {
+          entry.target.classList.add("in-view");
+          io.unobserve(entry.target);
+        }
+      }
+    }, { threshold: 0.08 });
+    targets.forEach(el => io.observe(el));
+  }
+
   function render() {
     const activeSearch = document.activeElement && document.activeElement.id === "menu-search";
     const selStart = activeSearch ? document.activeElement.selectionStart : null;
     const showMobileBar = Boolean(state.seat && state.session && state.session.status === "ACTIVE");
     document.body.classList.toggle("has-mobile-bar", showMobileBar);
 
-    if (!state.seat || !state.session) {
+    const nextMode = (!state.seat || !state.session)
+      ? "seating"
+      : (state.session.status === "ACTIVE" ? "session" : "completed");
+    const isEntering = state.lastViewMode !== nextMode;
+    state.lastViewMode = nextMode;
+
+    if (nextMode === "seating") {
       clearInterval(state.durationTimer);
-      renderSeatingView();
+      state.lastBillTotal = null;
+      renderSeatingView(isEntering);
+      observeReveals();
     } else {
+      const prevTotal = state.lastBillTotal;
+      const newTotal = state.session.total;
       renderSessionView(state.session);
       startDurationClock();
+      if (prevTotal !== null && Number(prevTotal) !== Number(newTotal)) {
+        const grandRow = document.querySelector("#shared-bill-panel .total-row.grand");
+        if (grandRow) grandRow.classList.add("bill-updated");
+      }
+      state.lastBillTotal = newTotal;
       if (activeSearch) {
         const searchEl = document.getElementById("menu-search");
         if (searchEl) {
@@ -887,6 +922,11 @@
       if (status === "OCCUPIED") {
         state.error = `Table ${tableNum} is occupied. Use "Join with Code / QR" to join guests at this table.`;
         render();
+        const tile = document.querySelector(`[data-table="${tableNum}"]`);
+        if (tile) {
+          tile.classList.add("shake");
+          setTimeout(() => tile.classList.remove("shake"), 420);
+        }
         return;
       }
       state.selectedTable = tableNum;

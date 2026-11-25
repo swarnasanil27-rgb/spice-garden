@@ -1598,3 +1598,213 @@ dialog::backdrop {
     padding: 0;
   }
 }
+
+/* ==================== TACTILE MOTION & ANIMATIONS ==================== */
+
+@keyframes fadeSlideUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes heroPhotoIn {
+  from { opacity: 0; transform: scale(0.97) translateY(10px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+@keyframes floatBadge {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-5px); }
+}
+
+@keyframes liveRadar {
+  0% { box-shadow: 0 0 0 0 rgba(34, 118, 71, 0.55); }
+  70% { box-shadow: 0 0 0 7px rgba(34, 118, 71, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(34, 118, 71, 0); }
+}
+
+@keyframes tablePop {
+  0% { transform: scale(0.95); }
+  60% { transform: scale(1.03); }
+  100% { transform: scale(1); }
+}
+
+@keyframes shakeReject {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-5px); }
+  40%, 80% { transform: translateX(5px); }
+}
+
+@keyframes badgeBounce {
+  0% { opacity: 0; transform: scale(0.75); }
+  65% { opacity: 1; transform: scale(1.08); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes statusBreath {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.62; }
+}
+
+@keyframes dialogPop {
+  from { opacity: 0; transform: scale(0.95) translateY(8px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+@keyframes backdropFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes billPulse {
+  0% { background-color: var(--brass-soft); }
+  100% { background-color: transparent; }
+}
+
+/* Interactive press physics */
+.btn,
+.pill,
+.mode-tab,
+.admin-tab,
+.pay-option,
+.star-btn,
+.stepper button {
+  transition: transform 0.14s cubic-bezier(0.22, 1, 0.36, 1),
+              background-color 0.16s ease,
+              border-color 0.16s ease,
+              color 0.16s ease,
+              box-shadow 0.18s ease;
+}
+
+.btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.btn:active:not(:disabled),
+.pill:active,
+.mode-tab:active,
+.admin-tab:active,
+.pay-option:active,
+.star-btn:active,
+.stepper button:active {
+  transform: scale(0.96);
+}
+
+/* Live SSE radar dot */
+.live-pill.online .live-dot {
+  animation: liveRadar 2.1s infinite;
+}
+
+/* Hero editorial entrance (only on landing enter) */
+.hero-band.anim-enter .hero-copy > * {
+  opacity: 0;
+  animation: fadeSlideUp 0.55s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+.hero-band.anim-enter .hero-copy > *:nth-child(1) { animation-delay: 0.04s; }
+.hero-band.anim-enter .hero-copy > *:nth-child(2) { animation-delay: 0.11s; }
+.hero-band.anim-enter .hero-copy > *:nth-child(3) { animation-delay: 0.18s; }
+.hero-band.anim-enter .hero-copy > *:nth-child(4) { animation-delay: 0.25s; }
+.hero-band.anim-enter .hero-copy > *:nth-child(5) { animation-delay: 0.32s; }
+
+.hero-band.anim-enter .hero-photo-frame {
+  opacity: 0;
+  animation: heroPhotoIn 0.65s cubic-bezier(0.22, 1, 0.36, 1) 0.15s forwards;
+}
+
+.hero-badge {
+  animation: floatBadge 5.2s ease-in-out infinite;
+}
+
+/* Scroll reveal sections */
+.reveal {
+  opacity: 0;
+  transform: translateY(18px);
+  transition: opacity 0.55s cubic-bezier(0.22, 1, 0.36, 1),
+              transform 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.reveal.in-view {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Staggered cards & tickets on view/tab entrance */
+.anim-stagger > * {
+  opacity: 0;
+  animation: fadeSlideUp 0.44s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  animation-delay: calc(var(--i, 0) * 45ms);
+}
+
+/* Dish image zoom & badge pop */
+.dish-photo-wrap img {
+  transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.dish-card:hover .dish-photo-wrap img {
+  transform: scale(1.06);
+}
+
+.in-order-tag {
+  animation: badgeBounce 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Table tiles tactile motion */
+.table-tile .chair-pip {
+  transition: transform 0.18s ease, opacity 0.18s ease;
+}
+
+.table-tile.available:hover .chair-pip {
+  opacity: 1;
+  transform: scaleY(1.28);
+}
+
+.table-tile.selected {
+  animation: tablePop 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.table-tile.shake {
+  animation: shakeReject 0.38s ease;
+}
+
+/* Kitchen preparing pulse */
+.status-PREPARING,
+.prog-step.current[data-step="PREPARING"] {
+  animation: statusBreath 1.8s ease-in-out infinite;
+}
+
+/* Shared bill flash when total changes */
+.total-row.grand.bill-updated {
+  border-radius: 4px;
+  padding-inline: 4px;
+  animation: billPulse 1.1s ease-out;
+}
+
+/* Modals & Toast transitions */
+dialog[open] {
+  animation: dialogPop 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+dialog[open]::backdrop {
+  animation: backdropFade 0.2s ease;
+}
+
+.toast {
+  transform: translate(-50%, 14px);
+  transition: opacity 0.22s ease, transform 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.toast.show {
+  transform: translate(-50%, 0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .reveal {
+    opacity: 1;
+    transform: none;
+  }
+}
