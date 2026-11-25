@@ -9,29 +9,45 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Instant;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
- * Service layer: starts Java's built-in HTTP server and routes each request
- * to the restaurant (domain) classes defined in RestaurantApp.java.
- *
- * Endpoints:
- *   GET    /api/menu
- *   POST   /api/order    name, table [, item, quantity]  -> creates the order / adds an item
- *   GET    /api/order    orderId                          -> current status of an order
- *   DELETE /api/order    orderId [, line]                 -> removes a line, or cancels the order
- *   GET    /api/bill     orderId
- *   POST   /api/pay      orderId, mode
- *   GET    /api/history
+ * Web server and API layer for Spice Garden.
+ * Routes Customer Portal, Admin Portal, Database transactions, and real-time SSE streams.
  */
 public class Main {
 
     static final Restaurant restaurant = new Restaurant();
-    static final Map<Integer, Order> orders = new ConcurrentHashMap<>();
+    static final RestaurantRepository repository = new DatabaseManager();
+    static final SseHub sseHub = new SseHub();
+
+    private static final Map<String, AdminToken> adminTokens = new ConcurrentHashMap<>();
+    private static final String ADMIN_USER = envOrDefault("ADMIN_USER", "admin");
+    private static final String ADMIN_PASSWORD = envOrDefault("ADMIN_PASSWORD", "spicegarden2026");
+
+    private static final class AdminToken {
+        final AdminUser user;
+        final Instant expiresAt;
+
+        AdminToken(AdminUser user, Instant expiresAt) {
+            this.user = user;
+            this.expiresAt = expiresAt;
+        }
+
+        boolean isExpired() {
+            return Instant.now().isAfter(expiresAt);
+        }
+    }
 
     @FunctionalInterface
     interface ApiHandler {
@@ -39,210 +55,455 @@ public class Main {
     }
 
     public static void main(String[] args) throws IOException {
-
-        seedMenu();
+        repository.initSchemaAndSeed(restaurant);
 
         int port = 8080;
-        String env = System.getenv("PORT");
-        if (env != null && !env.trim().isEmpty()) {
-            port = Integer.parseInt(env.trim());
+        String envPort = System.getenv("PORT");
+        if (envPort != null && !envPort.trim().isEmpty()) {
+            port = Integer.parseInt(envPort.trim());
         }
 
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
 
+        // Public & Customer Portal APIs
+        server.createContext("/api/health", ex -> api(ex, Main::handleHealth));
         server.createContext("/api/menu", ex -> api(ex, Main::handleMenu));
-        server.createContext("/api/order", ex -> api(ex, Main::handleOrder));
-        server.createContext("/api/bill", ex -> api(ex, Main::handleBill));
-        server.createContext("/api/pay", ex -> api(ex, Main::handlePay));
-        server.createContext("/api/history", ex -> api(ex, Main::handleHistory));
+        server.createContext("/api/tables", ex -> api(ex, Main::handleTables));
+        server.createContext("/api/sessions/join", ex -> api(ex, Main::handleJoinSession));
+        server.createContext("/api/sessions/current", ex -> api(ex, Main::handleCurrentSession));
+        server.createContext("/api/sessions/order", ex -> api(ex, Main::handleSessionOrder));
+        server.createContext("/api/sessions/send-kitchen", ex -> api(ex, Main::handleSendKitchen));
+        server.createContext("/api/sessions/checkout", ex -> api(ex, Main::handleCheckout));
+        server.createContext("/api/sessions", ex -> api(ex, Main::handleCreateSession));
+        server.createContext("/api/feedback", ex -> api(ex, Main::handleSubmitFeedback));
+        server.createContext("/api/events", Main::handleCustomerEvents);
+
+        // Admin Portal APIs
+        server.createContext("/api/admin/login", ex -> api(ex, Main::handleAdminLogin));
+        server.createContext("/api/admin/logout", ex -> api(ex, Main::handleAdminLogout));
+        server.createContext("/api/admin/me", ex -> api(ex, Main::handleAdminMe));
+        server.createContext("/api/admin/dashboard", ex -> api(ex, Main::handleAdminDashboard));
+        server.createContext("/api/admin/order-status", ex -> api(ex, Main::handleAdminOrderStatus));
+        server.createContext("/api/admin/release-table", ex -> api(ex, Main::handleAdminReleaseTable));
+        server.createContext("/api/admin/history", ex -> api(ex, Main::handleAdminHistory));
+        server.createContext("/api/admin/feedback", ex -> api(ex, Main::handleAdminFeedback));
+        server.createContext("/api/admin/events", Main::handleAdminEvents);
+
+        // Static pages & assets
         server.createContext("/", Main::handleStatic);
 
-        server.setExecutor(Executors.newFixedThreadPool(8));
+        server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         server.start();
 
-        System.out.println("Spice Garden server running on port " + port);
+        System.out.println("Spice Garden server running on port " + port + " [" + repository.getEngineDescription() + "]");
     }
 
-    static void seedMenu() {
-        restaurant.addToMenu(new VegItem("Paneer Tikka", 180, Category.STARTER));
-        restaurant.addToMenu(new NonVegItem("Chicken Wings", 220, Category.STARTER, 4));
-        restaurant.addToMenu(new VegItem("Veg Biryani", 200, Category.MAIN_COURSE));
-        restaurant.addToMenu(new NonVegItem("Butter Chicken", 320, Category.MAIN_COURSE, 3));
-        restaurant.addToMenu(new VegItem("Gulab Jamun", 80, Category.DESSERT));
-        restaurant.addToMenu(new VegItem("Masala Chai", 40, Category.DRINK));
-    }
+    // ===================== PUBLIC & CUSTOMER ENDPOINTS =====================
 
-    // ===================== ENDPOINTS =====================
+    static void handleHealth(HttpExchange ex) throws Exception {
+        requireMethod(ex, "GET");
+        send(ex, 200, "{\"status\":\"ok\",\"dbEngine\":" + q(repository.getEngineDescription()) + "}");
+    }
 
     static void handleMenu(HttpExchange ex) throws Exception {
         requireMethod(ex, "GET");
-
         StringBuilder b = new StringBuilder("[");
         boolean first = true;
-
         for (MenuItem item : restaurant.getMenu()) {
             if (!first) b.append(',');
             first = false;
-
             boolean nonVeg = item instanceof NonVegItem;
-
             b.append("{\"id\":").append(item.getId())
              .append(",\"name\":").append(q(item.getName()))
              .append(",\"price\":").append(num(item.getPrice()))
              .append(",\"category\":").append(q(item.getCategory().name()))
-             .append(",\"type\":").append(q(nonVeg ? "NON_VEG" : "VEG"));
-
+             .append(",\"type\":").append(q(nonVeg ? "NON_VEG" : "VEG"))
+             .append(",\"description\":").append(q(item.describe()));
             if (nonVeg) {
                 b.append(",\"spice\":").append(((NonVegItem) item).getSpiceLevel());
             }
-
             b.append('}');
         }
-
         send(ex, 200, b.append(']').toString());
     }
 
-    static void handleOrder(HttpExchange ex) throws Exception {
+    static void handleTables(HttpExchange ex) throws Exception {
+        requireMethod(ex, "GET");
+        List<Table> tables = repository.listTables();
+        List<TableSession> active = repository.listActiveSessions();
+        Map<Long, TableSession> bySessionId = new HashMap<>();
+        for (TableSession s : active) {
+            bySessionId.put(s.getSessionId(), s);
+        }
+
+        StringBuilder b = new StringBuilder("[");
+        for (int i = 0; i < tables.size(); i++) {
+            if (i > 0) b.append(',');
+            Table t = tables.get(i);
+            TableSession s = t.getActiveSessionId() != null ? bySessionId.get(t.getActiveSessionId()) : null;
+            b.append("{\"tableNumber\":").append(t.getTableNumber())
+             .append(",\"label\":").append(q(t.getLabel()))
+             .append(",\"capacity\":").append(t.getCapacity())
+             .append(",\"zone\":").append(q(t.getZone().name()))
+             .append(",\"zoneLabel\":").append(q(t.getZone().getDisplayName()))
+             .append(",\"status\":").append(q(t.getStatus().name()))
+             .append(",\"guestCount\":").append(s != null ? s.getCustomers().size() : 0)
+             .append(",\"durationSeconds\":").append(s != null ? s.getDurationSeconds() : 0)
+             .append('}');
+        }
+        send(ex, 200, b.append(']').toString());
+    }
+
+    static void handleCreateSession(HttpExchange ex) throws Exception {
+        requireMethod(ex, "POST");
+        Map<String, String> p = params(ex);
+        int tableNumber = toInt(p.get("tableNumber"), "Table number");
+        String customerName = p.get("customerName");
+
+        Pair<TableSession, Customer> created = repository.createTableSession(tableNumber, customerName);
+        TableSession session = created.getFirst();
+        Customer customer = created.getSecond();
+
+        sseHub.broadcastSessionAndAll(session.getSessionId(), "table_booked", session.getTableNumber());
+        send(ex, 201, "{\"session\":" + sessionJson(session) + ",\"customer\":" + customerJson(customer) + "}");
+    }
+
+    static void handleJoinSession(HttpExchange ex) throws Exception {
+        requireMethod(ex, "POST");
+        Map<String, String> p = params(ex);
+        String joinCode = p.get("joinCode");
+        String customerName = p.get("customerName");
+
+        Pair<TableSession, Customer> joined = repository.joinTableSession(joinCode, customerName);
+        TableSession session = joined.getFirst();
+        Customer customer = joined.getSecond();
+
+        sseHub.broadcastSessionAndAll(session.getSessionId(), "customer_joined", session.getTableNumber());
+        send(ex, 200, "{\"session\":" + sessionJson(session) + ",\"customer\":" + customerJson(customer) + "}");
+    }
+
+    static void handleCurrentSession(HttpExchange ex) throws Exception {
+        requireMethod(ex, "GET");
+        Map<String, String> p = params(ex);
+        TableSession session;
+        if (!isBlank(p.get("sessionId"))) {
+            session = repository.getSession(toLong(p.get("sessionId"), "Session id"));
+        } else if (!isBlank(p.get("joinCode"))) {
+            session = repository.getSessionByJoinCode(p.get("joinCode"));
+        } else {
+            throw new IllegalArgumentException("sessionId or joinCode is required");
+        }
+        send(ex, 200, sessionJson(session));
+    }
+
+    static void handleSessionOrder(HttpExchange ex) throws Exception {
         String method = ex.getRequestMethod();
         Map<String, String> p = params(ex);
 
-        if (method.equals("POST")) {
+        if ("POST".equals(method)) {
+            long sessionId = toLong(p.get("sessionId"), "Session id");
+            long customerId = toLong(p.get("customerId"), "Customer id");
+            int itemId = toInt(p.get("itemId"), "Item id");
+            int quantity = isBlank(p.get("quantity")) ? 1 : toInt(p.get("quantity"), "Quantity");
 
-            Order order;
-            int code = 200;
-
-            if (isBlank(p.get("orderId"))) {
-                // Validate the customer and create a new order
-                String name = p.get("name");
-                int table = toInt(p.get("table"), "Table number");
-                order = new Order(new Customer(name, table));
-                orders.put(order.getOrderId(), order);
-                code = 201;
-            } else {
-                order = orderOf(p);
+            MenuItem item = restaurant.getItem(itemId);
+            if (item == null) {
+                throw new IllegalArgumentException("Unknown menu item: " + itemId);
             }
 
-            if (!isBlank(p.get("item"))) {
-                int itemId = toInt(p.get("item"), "Item id");
-                int quantity = isBlank(p.get("quantity")) ? 1 : toInt(p.get("quantity"), "Quantity");
+            TableSession updated = repository.addOrderItem(sessionId, customerId, item, quantity);
+            sseHub.broadcastSessionAndAll(sessionId, "order_updated", updated.getTableNumber());
+            send(ex, 200, sessionJson(updated));
 
-                MenuItem item = restaurant.getItem(itemId);
-                if (item == null) {
-                    throw new IllegalArgumentException("No such item id: " + itemId);
-                }
+        } else if ("DELETE".equals(method)) {
+            long sessionId = toLong(p.get("sessionId"), "Session id");
+            long customerId = toLong(p.get("customerId"), "Customer id");
+            int orderId = toInt(p.get("orderId"), "Order id");
+            int lineIndex = toInt(p.get("lineIndex"), "Line index");
 
-                synchronized (order) {
-                    order.addItem(item, quantity);
-                }
-            }
-
-            send(ex, code, billJson(order));
-
-        } else if (method.equals("DELETE")) {
-
-            Order order = orderOf(p);
-
-            synchronized (order) {
-                if (!isBlank(p.get("line"))) {
-                    order.removeItem(toInt(p.get("line"), "Line number"));
-                    send(ex, 200, billJson(order));
-                } else {
-                    order.cancelOrder();
-                    orders.remove(order.getOrderId());
-                    send(ex, 200, "{\"cancelled\":true}");
-                }
-            }
-
-        } else if (method.equals("GET")) {
-            send(ex, 200, billJson(orderOf(p)));
+            TableSession updated = repository.removeOrderLine(sessionId, customerId, orderId, lineIndex);
+            sseHub.broadcastSessionAndAll(sessionId, "order_updated", updated.getTableNumber());
+            send(ex, 200, sessionJson(updated));
 
         } else {
-            send(ex, 405, "{\"error\":\"Method not allowed\"}");
+            throw new IllegalStateException("Use POST or DELETE for /api/sessions/order");
         }
     }
 
-    static void handleBill(HttpExchange ex) throws Exception {
-        requireMethod(ex, "GET");
-        Order order = orderOf(params(ex));
-        order.validateForBilling(); // InvalidOrderException for an empty order
-        send(ex, 200, billJson(order));
-    }
-
-    static void handlePay(HttpExchange ex) throws Exception {
+    static void handleSendKitchen(HttpExchange ex) throws Exception {
         requireMethod(ex, "POST");
         Map<String, String> p = params(ex);
-        Order order = orderOf(p);
+        long sessionId = toLong(p.get("sessionId"), "Session id");
+        long customerId = toLong(p.get("customerId"), "Customer id");
+        Integer orderId = isBlank(p.get("orderId")) ? null : toInt(p.get("orderId"), "Order id");
 
-        synchronized (order) {
-            order.validateForBilling();
-
-            double amount = order.total();
-            String mode = p.get("mode") == null ? "" : p.get("mode").trim().toUpperCase(Locale.ROOT);
-
-            // Runtime polymorphism: the Payment reference calls the right process()
-            Payment payment;
-            switch (mode) {
-                case "CASH": payment = new CashPayment(amount); break;
-                case "UPI":  payment = new UpiPayment(amount);  break;
-                case "CARD": payment = new CardPayment(amount); break;
-                default:
-                    throw new IllegalArgumentException("Choose CASH, UPI or CARD");
-            }
-
-            order.setPayment(payment);
-            payment.process();
-
-            // The kitchen runs on its own thread; a second thread records the
-            // order in the history once the kitchen has finished.
-            KitchenThread kitchen = new KitchenThread(order);
-            kitchen.start();
-
-            new Thread(() -> {
-                try {
-                    kitchen.join();
-                    restaurant.addToHistory(order);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-            }).start();
-
-            send(ex, 200, summaryJson(order, OrderStatus.PAID));
-        }
+        TableSession updated = repository.sendOrderToKitchen(sessionId, customerId, orderId);
+        sseHub.broadcastSessionAndAll(sessionId, "kitchen_preparing", updated.getTableNumber());
+        send(ex, 200, sessionJson(updated));
     }
 
-    static void handleHistory(HttpExchange ex) throws Exception {
-        requireMethod(ex, "GET");
+    static void handleCheckout(HttpExchange ex) throws Exception {
+        requireMethod(ex, "POST");
+        Map<String, String> p = params(ex);
+        long sessionId = toLong(p.get("sessionId"), "Session id");
+        String mode = p.get("mode");
 
-        StringBuilder b = new StringBuilder("[");
-        boolean first = true;
+        TableSession completed = repository.checkoutSession(sessionId, mode);
+        Payment payment = Payment.create(completed.getPaymentMode(), completed.getTotal());
 
-        for (Order order : restaurant.getHistory()) {
-            if (!first) b.append(',');
-            first = false;
-            b.append(summaryJson(order, order.getStatus()));
+        sseHub.broadcastSessionAndAll(sessionId, "table_released", completed.getTableNumber());
+        send(ex, 200, "{\"session\":" + sessionJson(completed) + ",\"receiptNote\":" + q(payment.getReceiptNote()) + "}");
+    }
+
+    static void handleSubmitFeedback(HttpExchange ex) throws Exception {
+        requireMethod(ex, "POST");
+        Map<String, String> p = params(ex);
+        long sessionId = toLong(p.get("sessionId"), "Session id");
+        int tableNumber = toInt(p.get("tableNumber"), "Table number");
+        String customerName = p.get("customerName");
+        int rating = toInt(p.get("rating"), "Rating");
+        String category = p.get("category");
+        String comment = p.get("comment");
+
+        Feedback saved = repository.saveFeedback(sessionId, tableNumber, customerName, rating, category, comment);
+        sseHub.broadcast("admin", "update", "{\"type\":\"feedback_added\",\"sessionId\":" + sessionId + "}");
+        send(ex, 201, feedbackJson(saved));
+    }
+
+    static void handleCustomerEvents(HttpExchange ex) throws IOException {
+        if (!"GET".equals(ex.getRequestMethod())) {
+            sendBytes(ex, 405, "text/plain; charset=utf-8", "Method not allowed".getBytes(StandardCharsets.UTF_8));
+            return;
+        }
+        Map<String, String> p = new HashMap<>();
+        parseQuery(ex.getRequestURI().getRawQuery(), p);
+        String channel;
+        if (!isBlank(p.get("sessionId"))) {
+            channel = "session:" + p.get("sessionId").trim();
+        } else {
+            channel = "tables";
+        }
+        sseHub.subscribe(channel, ex, "{\"channel\":" + q(channel) + "}");
+    }
+
+    // ===================== ADMIN ENDPOINTS =====================
+
+    static void handleAdminLogin(HttpExchange ex) throws Exception {
+        requireMethod(ex, "POST");
+        Map<String, String> p = params(ex);
+        String username = p.get("username");
+        String password = p.get("password");
+
+        if (username == null || password == null
+                || !ADMIN_USER.equals(username.trim())
+                || !ADMIN_PASSWORD.equals(password)) {
+            send(ex, 401, "{\"error\":\"Invalid admin username or password\"}");
+            return;
         }
 
+        AdminUser admin = new AdminUser(ADMIN_USER, "Spice Garden Manager");
+        String token = UUID.randomUUID().toString();
+        adminTokens.put(token, new AdminToken(admin, Instant.now().plusSeconds(86400)));
+
+        ex.getResponseHeaders().add("Set-Cookie", "sg_admin_token=" + token + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400");
+        send(ex, 200, "{\"token\":" + q(token)
+                + ",\"username\":" + q(admin.getUsername())
+                + ",\"displayName\":" + q(admin.getName())
+                + ",\"role\":" + q(admin.getRole()) + "}");
+    }
+
+    static void handleAdminLogout(HttpExchange ex) throws Exception {
+        requireMethod(ex, "POST");
+        String token = extractAdminToken(ex);
+        if (token != null) adminTokens.remove(token);
+        ex.getResponseHeaders().add("Set-Cookie", "sg_admin_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+        send(ex, 200, "{\"loggedOut\":true}");
+    }
+
+    static void handleAdminMe(HttpExchange ex) throws Exception {
+        requireMethod(ex, "GET");
+        AdminUser admin = requireAdmin(ex);
+        if (admin == null) return;
+        send(ex, 200, "{\"username\":" + q(admin.getUsername())
+                + ",\"displayName\":" + q(admin.getName())
+                + ",\"role\":" + q(admin.getRole()) + "}");
+    }
+
+    static void handleAdminDashboard(HttpExchange ex) throws Exception {
+        requireMethod(ex, "GET");
+        if (requireAdmin(ex) == null) return;
+
+        List<Table> tables = repository.listTables();
+        List<TableSession> activeSessions = repository.listActiveSessions();
+        Map<Long, TableSession> activeById = new HashMap<>();
+        double activeRevenue = 0.0;
+        for (TableSession s : activeSessions) {
+            activeById.put(s.getSessionId(), s);
+            activeRevenue += s.getTotal();
+        }
+
+        List<TableSession> completed = repository.searchHistory(null, null, null, "COMPLETED", null, null);
+        double completedRevenue = 0.0;
+        for (TableSession s : completed) {
+            completedRevenue += s.getTotal();
+        }
+
+        List<Feedback> feedbacks = repository.listFeedback(null);
+        double avgRating = 0.0;
+        if (!feedbacks.isEmpty()) {
+            int sum = 0;
+            for (Feedback f : feedbacks) sum += f.getRating();
+            avgRating = Math.round(((double) sum / feedbacks.size()) * 10.0) / 10.0;
+        }
+
+        int occupiedCount = 0;
+        for (Table t : tables) {
+            if (t.isOccupied()) occupiedCount++;
+        }
+
+        StringBuilder b = new StringBuilder();
+        b.append("{\"stats\":{")
+         .append("\"occupiedCount\":").append(occupiedCount)
+         .append(",\"availableCount\":").append(tables.size() - occupiedCount)
+         .append(",\"activeRevenue\":").append(num(activeRevenue))
+         .append(",\"completedRevenue\":").append(num(completedRevenue))
+         .append(",\"completedCount\":").append(completed.size())
+         .append(",\"avgRating\":").append(String.format(Locale.ROOT, "%.1f", avgRating))
+         .append(",\"feedbackCount\":").append(feedbacks.size())
+         .append(",\"dbEngine\":").append(q(repository.getEngineDescription()))
+         .append("},\"tables\":[");
+
+        for (int i = 0; i < tables.size(); i++) {
+            if (i > 0) b.append(',');
+            Table t = tables.get(i);
+            TableSession s = t.getActiveSessionId() != null ? activeById.get(t.getActiveSessionId()) : null;
+            b.append("{\"tableNumber\":").append(t.getTableNumber())
+             .append(",\"label\":").append(q(t.getLabel()))
+             .append(",\"capacity\":").append(t.getCapacity())
+             .append(",\"zone\":").append(q(t.getZone().name()))
+             .append(",\"zoneLabel\":").append(q(t.getZone().getDisplayName()))
+             .append(",\"status\":").append(q(t.getStatus().name()))
+             .append(",\"activeSession\":").append(s != null ? sessionJson(s) : "null")
+             .append('}');
+        }
+        b.append("]}");
+        send(ex, 200, b.toString());
+    }
+
+    static void handleAdminOrderStatus(HttpExchange ex) throws Exception {
+        requireMethod(ex, "POST");
+        if (requireAdmin(ex) == null) return;
+        Map<String, String> p = params(ex);
+        int orderId = toInt(p.get("orderId"), "Order id");
+        String statusRaw = p.get("status");
+        if (isBlank(statusRaw)) throw new IllegalArgumentException("Status is required");
+
+        OrderStatus next;
+        try {
+            next = OrderStatus.valueOf(statusRaw.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Invalid order status: " + statusRaw);
+        }
+
+        Order updated = repository.updateOrderStatus(orderId, next);
+        sseHub.broadcastSessionAndAll(updated.getSessionId(), "kitchen_status_changed", updated.getCustomer().getTableNumber());
+        send(ex, 200, orderJson(updated));
+    }
+
+    static void handleAdminReleaseTable(HttpExchange ex) throws Exception {
+        requireMethod(ex, "POST");
+        if (requireAdmin(ex) == null) return;
+        Map<String, String> p = params(ex);
+        int tableNumber = toInt(p.get("tableNumber"), "Table number");
+        String mode = p.get("mode");
+
+        TableSession closed = repository.adminReleaseTable(tableNumber, mode);
+        if (closed != null) {
+            sseHub.broadcastSessionAndAll(closed.getSessionId(), "table_released", tableNumber);
+        } else {
+            sseHub.broadcastAdminAndTables("table_released", tableNumber);
+        }
+        send(ex, 200, "{\"released\":true,\"tableNumber\":" + tableNumber + ",\"session\":" + (closed != null ? sessionJson(closed) : "null") + "}");
+    }
+
+    static void handleAdminHistory(HttpExchange ex) throws Exception {
+        requireMethod(ex, "GET");
+        if (requireAdmin(ex) == null) return;
+        Map<String, String> p = params(ex);
+
+        Integer table = isBlank(p.get("table")) ? null : toInt(p.get("table"), "Table");
+        List<TableSession> sessions = repository.searchHistory(
+                p.get("q"),
+                table,
+                p.get("mode"),
+                p.get("status"),
+                p.get("from"),
+                p.get("to")
+        );
+        Map<Long, List<Feedback>> fbMap = repository.mapFeedbackBySession();
+
+        StringBuilder b = new StringBuilder("[");
+        for (int i = 0; i < sessions.size(); i++) {
+            if (i > 0) b.append(',');
+            TableSession s = sessions.get(i);
+            List<Feedback> fbList = fbMap.getOrDefault(s.getSessionId(), List.of());
+            b.append("{\"session\":").append(sessionJson(s)).append(",\"feedback\":[");
+            for (int j = 0; j < fbList.size(); j++) {
+                if (j > 0) b.append(',');
+                b.append(feedbackJson(fbList.get(j)));
+            }
+            b.append("]}");
+        }
         send(ex, 200, b.append(']').toString());
+    }
+
+    static void handleAdminFeedback(HttpExchange ex) throws Exception {
+        requireMethod(ex, "GET");
+        if (requireAdmin(ex) == null) return;
+        Map<String, String> p = params(ex);
+        Integer minRating = isBlank(p.get("minRating")) ? null : toInt(p.get("minRating"), "minRating");
+
+        List<Feedback> list = repository.listFeedback(minRating);
+        StringBuilder b = new StringBuilder("[");
+        for (int i = 0; i < list.size(); i++) {
+            if (i > 0) b.append(',');
+            b.append(feedbackJson(list.get(i)));
+        }
+        send(ex, 200, b.append(']').toString());
+    }
+
+    static void handleAdminEvents(HttpExchange ex) throws IOException {
+        if (!"GET".equals(ex.getRequestMethod())) {
+            sendBytes(ex, 405, "text/plain; charset=utf-8", "Method not allowed".getBytes(StandardCharsets.UTF_8));
+            return;
+        }
+        if (authenticateAdmin(ex) == null) {
+            send(ex, 401, "{\"error\":\"Admin authentication required\"}");
+            ex.close();
+            return;
+        }
+        sseHub.subscribe("admin", ex, "{\"channel\":\"admin\"}");
     }
 
     // ===================== STATIC FILES =====================
 
     static void handleStatic(HttpExchange ex) throws IOException {
         String method = ex.getRequestMethod();
-        if (!method.equals("GET") && !method.equals("HEAD")) {
+        if (!"GET".equals(method) && !"HEAD".equals(method)) {
             sendBytes(ex, 405, "text/plain; charset=utf-8", "Method not allowed".getBytes(StandardCharsets.UTF_8));
             return;
         }
 
         String path = ex.getRequestURI().getPath();
-        if (path.equals("/")) path = "/index.html";
+        if ("/".equals(path) || "/customer".equals(path)) path = "/index.html";
+        else if ("/admin".equals(path) || "/admin/".equals(path)) path = "/admin.html";
 
         Path base = Paths.get("").toAbsolutePath().normalize();
         Path file = base.resolve(path.substring(1)).normalize();
 
-        // Only index.html and the public/ folder are served (never the source code)
         Path publicDir = base.resolve("public").normalize();
         boolean allowed = file.equals(base.resolve("index.html").normalize())
+                || file.equals(base.resolve("admin.html").normalize())
                 || file.startsWith(publicDir);
 
         if (!allowed || !Files.isRegularFile(file)) {
@@ -267,11 +528,55 @@ public class Main {
         return "application/octet-stream";
     }
 
-    // ===================== HELPERS =====================
+    // ===================== AUTH & JSON HELPERS =====================
+
+    static AdminUser requireAdmin(HttpExchange ex) throws IOException {
+        AdminUser admin = authenticateAdmin(ex);
+        if (admin == null) {
+            send(ex, 401, "{\"error\":\"Admin authentication required\"}");
+            return null;
+        }
+        return admin;
+    }
+
+    static AdminUser authenticateAdmin(HttpExchange ex) {
+        String token = extractAdminToken(ex);
+        if (token == null) return null;
+        AdminToken entry = adminTokens.get(token);
+        if (entry == null || entry.isExpired()) {
+            adminTokens.remove(token);
+            return null;
+        }
+        return entry.user;
+    }
+
+    static String extractAdminToken(HttpExchange ex) {
+        String auth = ex.getRequestHeaders().getFirst("Authorization");
+        if (auth != null && auth.startsWith("Bearer ")) {
+            return auth.substring(7).trim();
+        }
+        Map<String, String> q = new HashMap<>();
+        parseQuery(ex.getRequestURI().getRawQuery(), q);
+        if (!isBlank(q.get("token"))) {
+            return q.get("token").trim();
+        }
+        String cookieHeader = ex.getRequestHeaders().getFirst("Cookie");
+        if (cookieHeader != null) {
+            for (String part : cookieHeader.split(";")) {
+                String[] kv = part.trim().split("=", 2);
+                if (kv.length == 2 && "sg_admin_token".equals(kv[0].trim())) {
+                    return kv[1].trim();
+                }
+            }
+        }
+        return null;
+    }
 
     static void api(HttpExchange ex, ApiHandler handler) throws IOException {
         try {
             handler.handle(ex);
+        } catch (TableOccupiedException e) {
+            send(ex, 409, "{\"error\":" + q(e.getMessage()) + "}");
         } catch (IllegalArgumentException | IllegalStateException | InvalidOrderException e) {
             send(ex, 400, "{\"error\":" + q(e.getMessage()) + "}");
         } catch (Exception e) {
@@ -288,17 +593,8 @@ public class Main {
         }
     }
 
-    static Order orderOf(Map<String, String> p) {
-        int id = toInt(p.get("orderId"), "Order id");
-        Order order = orders.get(id);
-        if (order == null) {
-            throw new IllegalArgumentException("Unknown order: " + id);
-        }
-        return order;
-    }
-
     static int toInt(String value, String label) {
-        if (value == null) {
+        if (value == null || value.trim().isEmpty()) {
             throw new IllegalArgumentException(label + " is required");
         }
         try {
@@ -308,19 +604,43 @@ public class Main {
         }
     }
 
+    static long toLong(String value, String label) {
+        if (value == null || value.trim().isEmpty()) {
+            throw new IllegalArgumentException(label + " is required");
+        }
+        try {
+            return Long.parseLong(value.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(label + " must be a number");
+        }
+    }
+
     static boolean isBlank(String s) {
         return s == null || s.trim().isEmpty();
     }
 
+    static String envOrDefault(String key, String fallback) {
+        String val = System.getenv(key);
+        return (val == null || val.trim().isEmpty()) ? fallback : val.trim();
+    }
+
     static Map<String, String> params(HttpExchange ex) throws IOException {
         Map<String, String> m = new HashMap<>();
-        parse(ex.getRequestURI().getRawQuery(), m);
+        parseQuery(ex.getRequestURI().getRawQuery(), m);
         byte[] body = ex.getRequestBody().readAllBytes();
-        parse(new String(body, StandardCharsets.UTF_8), m);
+        if (body.length > 0) {
+            String raw = new String(body, StandardCharsets.UTF_8).trim();
+            String ct = ex.getRequestHeaders().getFirst("Content-Type");
+            if ((ct != null && ct.toLowerCase(Locale.ROOT).contains("application/json")) || raw.startsWith("{")) {
+                parseFlatJson(raw, m);
+            } else {
+                parseQuery(raw, m);
+            }
+        }
         return m;
     }
 
-    static void parse(String s, Map<String, String> m) {
+    static void parseQuery(String s, Map<String, String> m) {
         if (s == null || s.isEmpty()) return;
         for (String pair : s.split("&")) {
             if (pair.isEmpty()) continue;
@@ -332,48 +652,186 @@ public class Main {
         }
     }
 
-    static String billJson(Order o) {
+    private static final Pattern JSON_PAIR = Pattern.compile("\"([^\"]+)\"\\s*:\\s*(?:\"((?:\\\\.|[^\"\\\\])*)\"|(-?\\d+(?:\\.\\d+)?)|true|false|null)");
+
+    static void parseFlatJson(String json, Map<String, String> m) {
+        Matcher matcher = JSON_PAIR.matcher(json);
+        while (matcher.find()) {
+            String key = matcher.group(1);
+            String strVal = matcher.group(2);
+            String numVal = matcher.group(3);
+            if (strVal != null) {
+                m.put(key, unescapeJson(strVal));
+            } else if (numVal != null) {
+                m.put(key, numVal);
+            }
+        }
+    }
+
+    static String unescapeJson(String s) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '\\' && i + 1 < s.length()) {
+                char next = s.charAt(++i);
+                switch (next) {
+                    case '"': out.append('"'); break;
+                    case '\\': out.append('\\'); break;
+                    case 'n': out.append('\n'); break;
+                    case 'r': out.append('\r'); break;
+                    case 't': out.append('\t'); break;
+                    default: out.append(next);
+                }
+            } else {
+                out.append(c);
+            }
+        }
+        return out.toString();
+    }
+
+    static String sessionJson(TableSession s) {
+        double subtotal = s.getPrice();
+        double gst = s.getGst();
+        double total = s.getTotal();
+
+        Map<Long, List<Order>> byCustomer = s.getOrdersByCustomer();
+        StringBuilder b = new StringBuilder();
+        b.append("{\"sessionId\":").append(s.getSessionId())
+         .append(",\"tableNumber\":").append(s.getTableNumber())
+         .append(",\"joinCode\":").append(q(s.getJoinCode()))
+         .append(",\"status\":").append(q(s.getStatus().name()))
+         .append(",\"paymentMode\":").append(q(s.getPaymentMode()))
+         .append(",\"startedAt\":").append(q(s.getStartedAt().toString()))
+         .append(",\"endedAt\":").append(s.getEndedAt() == null ? "null" : q(s.getEndedAt().toString()))
+         .append(",\"durationSeconds\":").append(s.getDurationSeconds())
+         .append(",\"itemCount\":").append(s.getTotalItemCount())
+         .append(",\"subtotal\":").append(num(subtotal))
+         .append(",\"gst\":").append(num(gst))
+         .append(",\"total\":").append(num(total))
+         .append(",\"customers\":[");
+
+        List<Customer> customers = s.getCustomers();
+        for (int i = 0; i < customers.size(); i++) {
+            if (i > 0) b.append(',');
+            Customer c = customers.get(i);
+            List<Order> custOrders = byCustomer.getOrDefault(c.getCustomerId(), List.of());
+            double custSubtotal = 0.0;
+            for (Order o : custOrders) custSubtotal += o.getPrice();
+            b.append("{\"customerId\":").append(c.getCustomerId())
+             .append(",\"name\":").append(q(c.getName()))
+             .append(",\"joinedAt\":").append(q(c.getJoinedAt().toString()))
+             .append(",\"subtotal\":").append(num(custSubtotal))
+             .append(",\"orders\":[");
+            for (int j = 0; j < custOrders.size(); j++) {
+                if (j > 0) b.append(',');
+                b.append(orderJson(custOrders.get(j)));
+            }
+            b.append("]}");
+        }
+
+        b.append("],\"orders\":[");
+        List<Order> allOrders = s.getOrders();
+        for (int i = 0; i < allOrders.size(); i++) {
+            if (i > 0) b.append(',');
+            b.append(orderJson(allOrders.get(i)));
+        }
+
+        // Consolidated item summary across the entire table
+        Map<String, ConsolidatedLine> consolidated = new LinkedHashMap<>();
+        for (Order o : allOrders) {
+            if (o.getStatus() == OrderStatus.CANCELLED) continue;
+            for (Pair<MenuItem, Integer> line : o.getLines()) {
+                MenuItem mi = line.getFirst();
+                int qty = line.getSecond();
+                consolidated.compute(mi.getName(), (k, existing) -> {
+                    if (existing == null) return new ConsolidatedLine(mi.getName(), mi.getPrice(), qty);
+                    existing.quantity += qty;
+                    return existing;
+                });
+            }
+        }
+        b.append("],\"consolidatedLines\":[");
+        boolean firstLine = true;
+        for (ConsolidatedLine cl : consolidated.values()) {
+            if (!firstLine) b.append(',');
+            firstLine = false;
+            b.append("{\"name\":").append(q(cl.name))
+             .append(",\"price\":").append(num(cl.unitPrice))
+             .append(",\"quantity\":").append(cl.quantity)
+             .append(",\"lineTotal\":").append(num(cl.unitPrice * cl.quantity))
+             .append('}');
+        }
+        b.append("]}");
+        return b.toString();
+    }
+
+    private static final class ConsolidatedLine {
+        final String name;
+        final double unitPrice;
+        int quantity;
+
+        ConsolidatedLine(String name, double unitPrice, int quantity) {
+            this.name = name;
+            this.unitPrice = unitPrice;
+            this.quantity = quantity;
+        }
+    }
+
+    static String customerJson(Customer c) {
+        return "{\"customerId\":" + c.getCustomerId()
+                + ",\"name\":" + q(c.getName())
+                + ",\"tableNumber\":" + c.getTableNumber()
+                + ",\"sessionId\":" + c.getSessionId()
+                + ",\"joinedAt\":" + q(c.getJoinedAt().toString())
+                + "}";
+    }
+
+    static String orderJson(Order o) {
         double subtotal = o.getPrice();
         double total = o.total();
         double gst = Billable.round(total - subtotal);
 
         StringBuilder b = new StringBuilder();
         b.append("{\"orderId\":").append(o.getOrderId())
-         .append(",\"name\":").append(q(o.getCustomer().getName()))
-         .append(",\"table\":").append(o.getCustomer().getTableNumber())
+         .append(",\"sessionId\":").append(o.getSessionId())
+         .append(",\"customerId\":").append(o.getCustomer().getCustomerId())
+         .append(",\"customerName\":").append(q(o.getCustomer().getName()))
+         .append(",\"tableNumber\":").append(o.getCustomer().getTableNumber())
          .append(",\"status\":").append(q(o.getStatus().name()))
-         .append(",\"payment\":").append(q(o.getPaymentMode()))
+         .append(",\"paymentMode\":").append(q(o.getPaymentMode()))
+         .append(",\"createdAt\":").append(q(o.getCreatedAt().toString()))
+         .append(",\"subtotal\":").append(num(subtotal))
+         .append(",\"gst\":").append(num(gst))
+         .append(",\"total\":").append(num(total))
          .append(",\"lines\":[");
 
-        boolean first = true;
-        for (Pair<MenuItem, Integer> line : o.getLines()) {
-            if (!first) b.append(',');
-            first = false;
-            MenuItem item = line.getFirst();
-            int qty = line.getSecond();
-            b.append("{\"name\":").append(q(item.getName()))
+        List<Pair<MenuItem, Integer>> lines = o.getLines();
+        for (int i = 0; i < lines.size(); i++) {
+            if (i > 0) b.append(',');
+            MenuItem item = lines.get(i).getFirst();
+            int qty = lines.get(i).getSecond();
+            b.append("{\"lineIndex\":").append(i)
+             .append(",\"itemId\":").append(item.getId())
+             .append(",\"name\":").append(q(item.getName()))
              .append(",\"price\":").append(num(item.getPrice()))
              .append(",\"quantity\":").append(qty)
              .append(",\"lineTotal\":").append(num(item.getPrice() * qty))
              .append('}');
         }
-
-        b.append("],\"subtotal\":").append(num(subtotal))
-         .append(",\"gst\":").append(num(gst))
-         .append(",\"total\":").append(num(total))
-         .append('}');
-
+        b.append("]}");
         return b.toString();
     }
 
-    static String summaryJson(Order o, OrderStatus status) {
-        return "{\"id\":" + o.getOrderId()
-             + ",\"name\":" + q(o.getCustomer().getName())
-             + ",\"table\":" + o.getCustomer().getTableNumber()
-             + ",\"total\":" + num(o.total())
-             + ",\"mode\":" + q(o.getPaymentMode())
-             + ",\"status\":" + q(status.name())
-             + "}";
+    static String feedbackJson(Feedback f) {
+        return "{\"feedbackId\":" + f.getFeedbackId()
+                + ",\"sessionId\":" + f.getSessionId()
+                + ",\"tableNumber\":" + f.getTableNumber()
+                + ",\"customerName\":" + q(f.getCustomerName())
+                + ",\"rating\":" + f.getRating()
+                + ",\"category\":" + q(f.getCategory())
+                + ",\"comment\":" + q(f.getComment())
+                + ",\"createdAt\":" + q(f.getCreatedAt().toString())
+                + "}";
     }
 
     static String num(double v) {
@@ -381,6 +839,7 @@ public class Main {
     }
 
     static String q(String s) {
+        if (s == null) return "null";
         StringBuilder b = new StringBuilder("\"");
         for (char c : s.toCharArray()) {
             switch (c) {
@@ -404,7 +863,7 @@ public class Main {
     static void sendBytes(HttpExchange ex, int code, String type, byte[] bytes) throws IOException {
         ex.getResponseHeaders().set("Content-Type", type);
         ex.getResponseHeaders().set("Cache-Control", "no-store");
-        boolean head = ex.getRequestMethod().equals("HEAD");
+        boolean head = "HEAD".equals(ex.getRequestMethod());
         ex.sendResponseHeaders(code, head ? -1 : bytes.length);
         if (!head) {
             try (OutputStream os = ex.getResponseBody()) {

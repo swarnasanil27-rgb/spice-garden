@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#173427">
+  <title>Spice Garden · Admin Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,600;0,700;1,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/public/css/theme.css">
+  <script src="/public/js/admin.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/admin">
+      <span class="brand-mark">S</span>
+      <span class="brand-text">
+        <strong>Spice Garden</strong>
+        <small>Admin &amp; Kitchen Console</small>
+      </span>
+    </a>
+    <div class="topbar-right">
+      <span class="live-pill" id="admin-live-pill"><span class="live-dot"></span><span id="admin-live-label">Offline</span></span>
+      <a class="btn btn-outline btn-sm" href="/">Customer Portal</a>
+      <button class="btn btn-outline btn-sm" id="logout-btn" type="button" hidden>Sign out</button>
+    </div>
+  </header>
+
+  <main class="page" id="admin-app">
+    <p class="muted">Checking administrator session…</p>
+  </main>
+
+  <dialog id="admin-detail-dialog" style="width:min(620px, calc(100% - 28px));">
+    <div class="dialog-head">
+      <div>
+        <p class="eyebrow">Session Breakdown</p>
+        <h3 id="detail-title">Table Details</h3>
+      </div>
+      <button class="icon-close" type="button" id="close-detail" aria-label="Close detail">×</button>
+    </div>
+    <div id="detail-body"></div>
+  </dialog>
+
+  <div class="toast" id="toast" role="status"></div>
+</body>
+</html>

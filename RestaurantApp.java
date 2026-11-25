@@ -1,3 +1,4 @@
+import java.time.Instant;
 import java.util.*;
 
 // ===================== ENUMS (Module 5) =====================
@@ -6,7 +7,7 @@ enum Category {
 }
 
 enum OrderStatus {
-    PLACED, PAID, PREPARING, READY
+    PLACED, PAID, PREPARING, READY, SERVED, COMPLETED, CANCELLED
 }
 
 // ===================== CUSTOM EXCEPTION (Module 4) =====================
@@ -67,14 +68,23 @@ abstract class Person {
     public String getName() {
         return name;
     }
+
+    public abstract String getRole();
 }
 
 class Customer extends Person {
     public static final int MAX_TABLES = 10;
 
+    private final long customerId;
     private final int tableNumber;
+    private final long sessionId;
+    private final Instant joinedAt;
 
     public Customer(String name, int tableNumber) {
+        this(0L, name, tableNumber, 0L, Instant.now());
+    }
+
+    public Customer(long customerId, String name, int tableNumber, long sessionId, Instant joinedAt) {
         super(name);
 
         if (tableNumber < 1 || tableNumber > MAX_TABLES) {
@@ -83,11 +93,52 @@ class Customer extends Person {
             );
         }
 
+        this.customerId = customerId;
         this.tableNumber = tableNumber;
+        this.sessionId = sessionId;
+        this.joinedAt = joinedAt == null ? Instant.now() : joinedAt;
+    }
+
+    public long getCustomerId() {
+        return customerId;
     }
 
     public int getTableNumber() {
         return tableNumber;
+    }
+
+    public long getSessionId() {
+        return sessionId;
+    }
+
+    public Instant getJoinedAt() {
+        return joinedAt;
+    }
+
+    @Override
+    public String getRole() {
+        return "CUSTOMER";
+    }
+}
+
+class AdminUser extends Person {
+    private final String username;
+
+    public AdminUser(String username, String displayName) {
+        super(displayName);
+        if (username == null || username.trim().isEmpty()) {
+            throw new IllegalArgumentException("Username cannot be empty");
+        }
+        this.username = username.trim();
+    }
+
+    public String getUsername() {
+        return username;
+    }
+
+    @Override
+    public String getRole() {
+        return "ADMIN";
     }
 }
 
@@ -101,6 +152,10 @@ abstract class MenuItem implements Billable {
     private final Category category;
 
     public MenuItem(String name, double price, Category category) {
+        this(0, name, price, category);
+    }
+
+    public MenuItem(int explicitId, String name, double price, Category category) {
 
         if (name == null || name.trim().isEmpty()) {
             throw new IllegalArgumentException("Item name cannot be empty");
@@ -114,7 +169,14 @@ abstract class MenuItem implements Billable {
             throw new IllegalArgumentException("Category cannot be null");
         }
 
-        this.id = ++count;
+        if (explicitId > 0) {
+            this.id = explicitId;
+            if (explicitId > count) {
+                count = explicitId;
+            }
+        } else {
+            this.id = ++count;
+        }
         this.name = name.trim();
         this.price = price;
         this.category = category;
@@ -146,6 +208,10 @@ class VegItem extends MenuItem {
         super(name, price, category);
     }
 
+    public VegItem(int id, String name, double price, Category category) {
+        super(id, name, price, category);
+    }
+
     @Override
     public String describe() {
         return "[VEG]     " + getName();
@@ -157,8 +223,13 @@ class NonVegItem extends MenuItem {
 
     public NonVegItem(String name, double price,
                       Category category, int spiceLevel) {
+        this(0, name, price, category, spiceLevel);
+    }
 
-        super(name, price, category);
+    public NonVegItem(int id, String name, double price,
+                      Category category, int spiceLevel) {
+
+        super(id, name, price, category);
 
         if (spiceLevel < 1 || spiceLevel > 5) {
             throw new IllegalArgumentException(
@@ -196,6 +267,19 @@ abstract class Payment {
     public abstract void process();
 
     public abstract String getMode();
+
+    public abstract String getReceiptNote();
+
+    public static Payment create(String mode, double amount) {
+        String normalized = mode == null ? "" : mode.trim().toUpperCase(Locale.ROOT);
+        switch (normalized) {
+            case "CASH": return new CashPayment(amount);
+            case "UPI":  return new UpiPayment(amount);
+            case "CARD": return new CardPayment(amount);
+            default:
+                throw new IllegalArgumentException("Choose CASH, UPI or CARD");
+        }
+    }
 }
 
 class CashPayment extends Payment {
@@ -214,6 +298,11 @@ class CashPayment extends Payment {
     @Override
     public String getMode() {
         return "CASH";
+    }
+
+    @Override
+    public String getReceiptNote() {
+        return String.format(Locale.ROOT, "Cash settlement of Rs.%.2f confirmed at counter.", amount);
     }
 }
 
@@ -234,6 +323,11 @@ class UpiPayment extends Payment {
     public String getMode() {
         return "UPI";
     }
+
+    @Override
+    public String getReceiptNote() {
+        return String.format(Locale.ROOT, "UPI transfer of Rs.%.2f verified.", amount);
+    }
 }
 
 class CardPayment extends Payment {
@@ -253,6 +347,11 @@ class CardPayment extends Payment {
     public String getMode() {
         return "CARD";
     }
+
+    @Override
+    public String getReceiptNote() {
+        return String.format(Locale.ROOT, "Card charge of Rs.%.2f approved.", amount);
+    }
 }
 
 // ===================== ORDER: OVERLOADING + INNER CLASS =====================
@@ -260,8 +359,10 @@ class Order implements Billable {
 
     private static int counter = 1000;
 
-    private final int orderId = ++counter;
+    private final int orderId;
+    private final long sessionId;
     private final Customer customer;
+    private final Instant createdAt;
 
     private final List<Pair<MenuItem, Integer>> lines =
             new ArrayList<>();
@@ -270,6 +371,11 @@ class Order implements Billable {
     private String paymentMode = "NOT PAID";
 
     public Order(Customer customer) {
+        this(++counter, 0L, customer, OrderStatus.PLACED, "NOT PAID", Instant.now());
+    }
+
+    public Order(int explicitOrderId, long sessionId, Customer customer,
+                 OrderStatus status, String paymentMode, Instant createdAt) {
 
         if (customer == null) {
             throw new IllegalArgumentException(
@@ -277,7 +383,34 @@ class Order implements Billable {
             );
         }
 
+        if (explicitOrderId > counter) {
+            counter = explicitOrderId;
+        }
+        this.orderId = explicitOrderId;
+        this.sessionId = sessionId;
         this.customer = customer;
+        this.status = status == null ? OrderStatus.PLACED : status;
+        this.paymentMode = paymentMode == null ? "NOT PAID" : paymentMode;
+        this.createdAt = createdAt == null ? Instant.now() : createdAt;
+    }
+
+    public long getSessionId() {
+        return sessionId;
+    }
+
+    public Instant getCreatedAt() {
+        return createdAt;
+    }
+
+    public void addLineRaw(MenuItem item, int quantity) {
+        lines.add(new Pair<>(item, quantity));
+    }
+
+    public void markSettled(String mode) {
+        this.paymentMode = mode;
+        if (this.status == OrderStatus.PLACED) {
+            this.status = OrderStatus.PAID;
+        }
     }
 
     // METHOD OVERLOADING
