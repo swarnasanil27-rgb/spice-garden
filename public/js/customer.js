@@ -8,7 +8,17 @@
     "Veg Biryani": "/public/dishes/veg-biryani.jpg",
     "Butter Chicken": "/public/dishes/butter-chicken.jpg",
     "Gulab Jamun": "/public/dishes/gulab-jamun.jpg",
-    "Masala Chai": "/public/dishes/masala-chai.jpg"
+    "Masala Chai": "/public/dishes/masala-chai.jpg",
+    "Crispy Aloo Tikki": "/public/dishes/crispy-aloo-tikki.jpg",
+    "Hara Bhara Kebab": "/public/dishes/hara-bhara-kebab.jpg",
+    "Chicken Tikka": "/public/dishes/chicken-tikka.jpg",
+    "Mutton Seekh Kebab": "/public/dishes/mutton-seekh-kebab.jpg",
+    "Dal Makhani": "/public/dishes/dal-makhani.jpg",
+    "Palak Paneer": "/public/dishes/palak-paneer.jpg",
+    "Chicken Biryani": "/public/dishes/chicken-biryani.jpg",
+    "Rogan Josh": "/public/dishes/rogan-josh.jpg",
+    "Rasmalai": "/public/dishes/rasmalai.jpg",
+    "Mango Lassi": "/public/dishes/mango-lassi.jpg"
   };
   const DISH_FALLBACKS = {
     "Paneer Tikka": "/public/dishes/paneer-tikka.svg",
@@ -445,11 +455,11 @@
             <div>
               <p class="eyebrow">From Our Kitchen</p>
               <h2>Signature Dishes</h2>
-              <p class="muted" style="margin:6px 0 0;">Preview today’s menu, then select a table above to start ordering.</p>
+              <p class="muted" style="margin:6px 0 0;">Showing 4 signature picks · Select a table above to browse all ${state.menu.length} veg &amp; non-veg dishes.</p>
             </div>
           </div>
           <div class="menu-grid ${animateLanding ? "anim-stagger" : ""}">
-            ${state.menu.map((item, idx) => `<div style="--i:${idx};">${renderDishCard(item, 0, false)}</div>`).join("")}
+            ${state.menu.slice(0, 4).map((item, idx) => `<div style="--i:${idx};">${renderDishCard(item, 0, false)}</div>`).join("")}
           </div>
         </section>
 

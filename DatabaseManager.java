@@ -251,32 +251,50 @@ public class DatabaseManager implements RestaurantRepository {
     }
 
     private void seedAndLoadMenu(Connection conn, Restaurant restaurant) throws SQLException {
-        int count = 0;
+        List<MenuItem> seed = List.of(
+                new VegItem("Paneer Tikka", 180, Category.STARTER),
+                new NonVegItem("Chicken Wings", 220, Category.STARTER, 4),
+                new VegItem("Veg Biryani", 200, Category.MAIN_COURSE),
+                new NonVegItem("Butter Chicken", 320, Category.MAIN_COURSE, 3),
+                new VegItem("Gulab Jamun", 80, Category.DESSERT),
+                new VegItem("Masala Chai", 40, Category.DRINK),
+                new VegItem("Crispy Aloo Tikki", 140, Category.STARTER),
+                new VegItem("Hara Bhara Kebab", 160, Category.STARTER),
+                new NonVegItem("Chicken Tikka", 260, Category.STARTER, 3),
+                new NonVegItem("Mutton Seekh Kebab", 310, Category.STARTER, 4),
+                new VegItem("Dal Makhani", 220, Category.MAIN_COURSE),
+                new VegItem("Palak Paneer", 240, Category.MAIN_COURSE),
+                new NonVegItem("Chicken Biryani", 290, Category.MAIN_COURSE, 4),
+                new NonVegItem("Rogan Josh", 360, Category.MAIN_COURSE, 4),
+                new VegItem("Rasmalai", 110, Category.DESSERT),
+                new VegItem("Mango Lassi", 90, Category.DRINK)
+        );
+
+        java.util.Set<String> existingNames = new java.util.HashSet<>();
         try (Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM menu_items")) {
-            if (rs.next()) count = rs.getInt(1);
+             ResultSet rs = st.executeQuery("SELECT name FROM menu_items")) {
+            while (rs.next()) {
+                existingNames.add(rs.getString("name").trim().toLowerCase(Locale.ROOT));
+            }
         }
 
-        if (count == 0) {
-            List<MenuItem> seed = List.of(
-                    new VegItem("Paneer Tikka", 180, Category.STARTER),
-                    new NonVegItem("Chicken Wings", 220, Category.STARTER, 4),
-                    new VegItem("Veg Biryani", 200, Category.MAIN_COURSE),
-                    new NonVegItem("Butter Chicken", 320, Category.MAIN_COURSE, 3),
-                    new VegItem("Gulab Jamun", 80, Category.DESSERT),
-                    new VegItem("Masala Chai", 40, Category.DRINK)
-            );
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO menu_items (name, price, category, item_type, spice_level) VALUES (?, ?, ?, ?, ?)")) {
-                for (MenuItem item : seed) {
-                    boolean nonVeg = item instanceof NonVegItem;
-                    ps.setString(1, item.getName());
-                    ps.setDouble(2, item.getPrice());
-                    ps.setString(3, item.getCategory().name());
-                    ps.setString(4, nonVeg ? "NON_VEG" : "VEG");
-                    ps.setInt(5, nonVeg ? ((NonVegItem) item).getSpiceLevel() : 1);
-                    ps.addBatch();
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO menu_items (name, price, category, item_type, spice_level) VALUES (?, ?, ?, ?, ?)")) {
+            boolean anyAdded = false;
+            for (MenuItem item : seed) {
+                if (existingNames.contains(item.getName().toLowerCase(Locale.ROOT))) {
+                    continue;
                 }
+                boolean nonVeg = item instanceof NonVegItem;
+                ps.setString(1, item.getName());
+                ps.setDouble(2, item.getPrice());
+                ps.setString(3, item.getCategory().name());
+                ps.setString(4, nonVeg ? "NON_VEG" : "VEG");
+                ps.setInt(5, nonVeg ? ((NonVegItem) item).getSpiceLevel() : 1);
+                ps.addBatch();
+                anyAdded = true;
+            }
+            if (anyAdded) {
                 ps.executeBatch();
             }
         }
